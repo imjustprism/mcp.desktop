@@ -72,7 +72,7 @@ const NON_CACHEABLE_ACTIONS: Readonly<Record<string, Set<string>>> = {
     discord: new Set(["api"]),
     store: new Set(["call", "state"]),
     plugin: new Set(["toggle", "enable", "disable", "setSetting"]),
-    module: new Set(["loadLazy", "watch", "watchGet", "watchStop", "diff"]),
+    module: new Set(["loadLazy", "watch", "watchGet", "watchStop", "diff", "annotate", "extract"]),
     trace: new Set(["start", "get", "stop", "store"]),
     intercept: new Set(["set", "get", "stop"]),
 };

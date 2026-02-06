@@ -6,8 +6,21 @@
 
 import { FluxDispatcher } from "@webpack/common";
 
-import { ActiveTrace, FluxAction, FluxDispatcherInternal, StoreWithListeners } from "../types";
-import { cleanupAllTraces, cleanupExpiredTraces, cleanupTrace, findStore, traceState } from "./utils";
+import { ActiveTrace, FluxAction, FluxDispatcherInternal, StoreWithListeners, TraceCapture } from "../types";
+import { cleanupAllTraces, cleanupExpiredTraces, cleanupTrace, findStore, serializeResult, traceState } from "./utils";
+
+function summarizeCaptures(captures: TraceCapture[], limit: number) {
+    const typeCounts: Record<string, number> = {};
+    for (const c of captures) typeCounts[c.type] = (typeCounts[c.type] ?? 0) + 1;
+
+    const sliced = captures.slice(0, limit).map(c => {
+        if (!c.data) return c;
+        const serialized = serializeResult(c.data, 500);
+        return { ts: c.ts, type: c.type, data: serialized.length > 500 ? serialized.slice(0, 500) + "..." : serialized };
+    });
+
+    return { typeCounts, captures: sliced, truncated: captures.length > limit || undefined };
+}
 
 export async function handleTraceTool(args: Record<string, unknown>): Promise<unknown> {
     const action = args.action as string | undefined;
@@ -140,14 +153,13 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
         if (!trace) return { error: true, message: `Trace ${traceId} not found or expired` };
 
         const remaining = Math.max(0, trace.expiresAt - Date.now());
-        const truncated = trace.captures.length > 50;
+        const summary = summarizeCaptures(trace.captures, 50);
 
         return {
             id: traceId,
             captureCount: trace.captures.length,
             remaining,
-            captures: trace.captures.slice(0, 50),
-            truncated: truncated || undefined
+            ...summary
         };
     }
 
@@ -163,7 +175,8 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
 
         const { captures } = trace;
         cleanupTrace(traceId);
-        return { id: traceId, stopped: true, captureCount: captures.length, captures: captures.slice(0, 100) };
+        const summary = summarizeCaptures(captures, 100);
+        return { id: traceId, stopped: true, captureCount: captures.length, ...summary };
     }
 
     if (action === "store") {
@@ -178,7 +191,7 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
                 storeName += "Store";
                 try {
                     foundStore = findStore(storeName as Parameters<typeof findStore>[0]) as StoreWithListeners;
-                } catch { }
+                } catch { foundStore = null; }
             }
         }
         if (!foundStore) return { error: true, message: `Store "${storeName}" not found` };

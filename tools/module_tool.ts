@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { factoryListeners, filters, find, findAll, wreq } from "@webpack";
+import { canonicalizeMatch } from "@utils/patches";
+import { factoryListeners, filters, wreq } from "@webpack";
 import { Flux } from "@webpack/common";
 import { loadLazyChunks } from "debug/loadLazyChunks";
 
@@ -12,7 +13,9 @@ import { ModuleToolArgs, ModuleWatch, ToolResult, WebpackExport, WebpackModule }
 import {
     clearBatchResultsCache,
     clearModuleSourceCache,
+    countModuleMatchesFast,
     extractModule,
+    getIntlKeyFromHash,
     getModulePatchedBy,
     getModuleSource,
     invalidateModuleIdCache,
@@ -20,6 +23,26 @@ import {
     parseRegex,
     searchModulesOptimized,
 } from "./utils";
+
+type ModuleMatch = { id: string; exports: unknown; key: string };
+
+function findModulesWithIds(filter: (m: unknown) => boolean, max: number): ModuleMatch[] {
+    const results: ModuleMatch[] = [];
+    for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
+        if (results.length >= max || !mod?.loaded || mod.exports == null) continue;
+        const exp = mod.exports;
+        if (filter(exp)) { results.push({ id, exports: exp, key: "module" }); continue; }
+        if (typeof exp !== "object") continue;
+        for (const key of Object.keys(exp)) {
+            const nested = exp[key];
+            if (nested && filter(nested)) {
+                results.push({ id, exports: nested, key });
+                break;
+            }
+        }
+    }
+    return results;
+}
 
 export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult> {
     const { action, id, props, code, displayName, className, exportName, exportValue, pattern } = args;
@@ -176,6 +199,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     }
 
     if ((action === "extract" || (!action && id)) && id) {
+        if (!wreq.m[id]) return { error: true, message: `Module ${id} not found` };
         const patched = args.patched !== false;
         const source = extractModule(id, patched);
         const patchedBy = getModulePatchedBy(id);
@@ -241,54 +265,68 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     }
 
     if (props?.length) {
+        const filter = filters.byProps(...props);
+        const mods = findModulesWithIds(filter, args.all ? limit : 1);
+        if (!mods.length) return { found: false, message: "No module found with those props" };
+
         if (args.all) {
-            const mods = findAll(filters.byProps(...props));
             return {
                 count: mods.length,
                 filterType: "props",
-                modules: mods.slice(0, limit).map((mod, i) => ({
+                modules: mods.map((m, i) => ({
                     index: i,
-                    type: typeof mod,
-                    keys: typeof mod === "object" && mod ? Object.keys(mod).slice(0, 30) : undefined,
-                    sample: typeof mod === "object" && mod ? Object.fromEntries(Object.keys(mod).slice(0, 10).map(k => [k, typeof (mod as Record<string, unknown>)[k]])) : typeof mod === "function" ? mod.toString().slice(0, 200) : String(mod)
+                    moduleId: m.id,
+                    exportKey: m.key,
+                    type: typeof m.exports,
+                    keys: typeof m.exports === "object" && m.exports ? Object.keys(m.exports).slice(0, 30) : undefined,
+                    sample: typeof m.exports === "object" && m.exports ? Object.fromEntries(Object.keys(m.exports).slice(0, 10).map(k => [k, typeof (m.exports as Record<string, unknown>)[k]])) : typeof m.exports === "function" ? (m.exports as Function).toString().slice(0, 200) : String(m.exports)
                 }))
             };
         }
-        const mod = find(filters.byProps(...props));
-        if (!mod) return { found: false, message: "No module found with those props" };
-        return { found: true, keys: Object.keys(mod), sample: Object.fromEntries(Object.keys(mod).slice(0, 20).map(k => [k, typeof (mod as Record<string, unknown>)[k]])) };
+        const m = mods[0];
+        const mod = m.exports as Record<string, unknown>;
+        return { found: true, moduleId: m.id, exportKey: m.key, keys: Object.keys(mod), sample: Object.fromEntries(Object.keys(mod).slice(0, 20).map(k => [k, typeof mod[k]])) };
     }
 
     if (code?.length) {
+        const parsedCode = code.map(c => canonicalizeMatch(c));
+        const filter = (m: unknown) => {
+            if (typeof m !== "function") return false;
+            const str = Function.prototype.toString.call(m);
+            return parsedCode.every(c => str.includes(c));
+        };
+        const mods = findModulesWithIds(filter, args.all ? limit : 1);
+        if (!mods.length) return { found: false, message: "No module found with that code" };
+
         if (args.all) {
-            const mods = findAll(filters.byCode(...code));
             return {
                 count: mods.length,
                 filterType: "code",
-                modules: mods.slice(0, limit).map((mod, i) => ({
+                modules: mods.map((m, i) => ({
                     index: i,
-                    type: typeof mod,
-                    source: typeof mod === "function" ? mod.toString().slice(0, 200) : undefined,
-                    keys: typeof mod === "object" && mod ? Object.keys(mod).slice(0, 30) : undefined
+                    moduleId: m.id,
+                    exportKey: m.key,
+                    type: typeof m.exports,
+                    source: typeof m.exports === "function" ? (m.exports as Function).toString().slice(0, 200) : undefined,
+                    keys: typeof m.exports === "object" && m.exports ? Object.keys(m.exports).slice(0, 30) : undefined
                 }))
             };
         }
-        const mod = find(filters.byCode(...code));
-        if (!mod) return { found: false, message: "No module found with that code" };
-        if (typeof mod === "function") return { found: true, type: "function", source: mod.toString().slice(0, 5000) };
-        return { found: true, type: typeof mod, keys: Object.keys(mod as object) };
+        const m = mods[0];
+        if (typeof m.exports === "function") return { found: true, moduleId: m.id, exportKey: m.key, type: "function", source: (m.exports as Function).toString().slice(0, 5000) };
+        return { found: true, moduleId: m.id, exportKey: m.key, type: typeof m.exports, keys: Object.keys(m.exports as object) };
     }
 
     if (displayName) {
         const exact = args.exact ?? false;
         const lower = displayName.toLowerCase();
-        const matches: Array<{ displayName: string; type: string; keys?: string[] }> = [];
+        const matches: Array<{ moduleId: string; exportKey: string; displayName: string; type: string; keys?: string[] }> = [];
 
-        for (const mod of Object.values(wreq.c) as WebpackModule[]) {
+        for (const [modId, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
             if (matches.length >= limit || !mod?.exports) continue;
             const exp = mod.exports;
 
-            const checkExport = (val: WebpackExport | null | undefined) => {
+            const checkExport = (val: WebpackExport | null | undefined, key: string) => {
                 if (!val) return;
                 const dn = val.displayName ?? val.name;
                 if (typeof dn !== "string") return;
@@ -296,6 +334,8 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 if (isMatch) {
                     const hasRender = typeof val === "function" && (val as { prototype?: { render?: unknown } }).prototype?.render;
                     matches.push({
+                        moduleId: modId,
+                        exportKey: key,
                         displayName: dn,
                         type: typeof val === "function" ? (hasRender ? "Component" : "Function") : "Object",
                         keys: typeof val === "object" ? Object.keys(val).slice(0, 15) : undefined
@@ -303,10 +343,10 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 }
             };
 
-            checkExport(exp.default as WebpackExport | undefined);
-            checkExport(exp as WebpackExport);
+            checkExport(exp.default as WebpackExport | undefined, "default");
+            checkExport(exp as WebpackExport, "module");
             for (const key of Object.keys(exp).slice(0, 10)) {
-                if (key !== "default") checkExport(exp[key] as WebpackExport | undefined);
+                if (key !== "default") checkExport(exp[key] as WebpackExport | undefined, key);
             }
         }
 
@@ -315,21 +355,21 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
 
     if (className) {
         const lower = className.toLowerCase();
-        const matches: Array<{ classes: Record<string, string> }> = [];
-
-        const mods = findAll(m => {
+        const filter = (m: unknown) => {
             if (!m || typeof m !== "object") return false;
             const keys = Object.keys(m);
             return keys.length > 0 && keys.some(k => typeof (m as Record<string, unknown>)[k] === "string" && ((m as Record<string, unknown>)[k] as string).includes("_") && k.toLowerCase().includes(lower));
-        });
+        };
+        const mods = findModulesWithIds(filter, limit);
 
-        for (const mod of mods.slice(0, limit)) {
-            const keys = Object.keys(mod as object);
-            const matchingClasses = keys.filter(k => k.toLowerCase().includes(lower) && typeof (mod as Record<string, unknown>)[k] === "string");
+        const matches = mods.map(m => {
+            const obj = m.exports as Record<string, string>;
+            const keys = Object.keys(obj);
+            const matchingClasses = keys.filter(k => k.toLowerCase().includes(lower) && typeof obj[k] === "string");
             const classes: Record<string, string> = {};
-            for (const k of matchingClasses.slice(0, 10)) classes[k] = (mod as Record<string, string>)[k];
-            matches.push({ classes });
-        }
+            for (const k of matchingClasses.slice(0, 10)) classes[k] = obj[k];
+            return { moduleId: m.id, classes };
+        });
 
         return { count: mods.length, matches };
     }
@@ -406,18 +446,100 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             inWebpackCommon: !!commonValue,
             count: matches.length,
             matches,
-            tip: !matches.length ? `No export named "${exportName}" found` : commonValue ? `Available as Vencord.Webpack.Common.${exportName}` : undefined
+            tip: matches.length ? (commonValue ? `Available as Vencord.Webpack.Common.${exportName}` : undefined) : (commonValue ? `Found in Webpack.Common but module ID could not be resolved. Use Vencord.Webpack.Common.${exportName}` : `No export named "${exportName}" found`)
         };
     }
 
     if (exportValue) {
-        const mods = findAll(m => m && typeof m === "object" && Object.values(m).includes(exportValue));
-        const matches = mods.slice(0, limit).map(mod => {
-            const keys = Object.keys(mod as object);
-            return { keys: keys.slice(0, 20), matchingKeys: keys.filter(k => (mod as Record<string, unknown>)[k] === exportValue) };
+        const filter = (m: unknown): boolean => !!m && typeof m === "object" && Object.values(m as object).includes(exportValue);
+        const mods = findModulesWithIds(filter, limit);
+        const matches = mods.map(m => {
+            const obj = m.exports as Record<string, unknown>;
+            const keys = Object.keys(obj);
+            return { moduleId: m.id, keys: keys.slice(0, 20), matchingKeys: keys.filter(k => obj[k] === exportValue) };
         });
 
         return { value: exportValue, valueType: typeof exportValue, count: mods.length, matches };
+    }
+
+    if (action === "annotate" && id) {
+        let source = args.patched !== false ? extractModule(id, true) : getModuleSource(id);
+        if (!source) return { error: true, message: `Module ${id} not found` };
+
+        const annotations: Array<{ hash: string; key: string }> = [];
+        source = source.replace(/\.t\.([A-Za-z0-9+/]{6})/g, (match, hash: string) => {
+            const key = getIntlKeyFromHash(hash);
+            if (key) { annotations.push({ hash, key }); return `.t[/*${key}*/]`; }
+            return match;
+        });
+        source = source.replace(/\.t\["([A-Za-z0-9+/]{6,8})"\]/g, (match, hash: string) => {
+            const key = getIntlKeyFromHash(hash);
+            if (key) { annotations.push({ hash, key }); return `.t[/*${key}*/]`; }
+            return match;
+        });
+
+        const maxLen = Math.min(maxLength, 50000);
+        return {
+            id,
+            patched: args.patched !== false,
+            patchedBy: getModulePatchedBy(id),
+            annotationCount: annotations.length,
+            size: source.length,
+            truncated: source.length > maxLen,
+            source: source.slice(0, maxLen)
+        };
+    }
+
+    if (action === "suggest" && id) {
+        const source = getModuleSource(id);
+        if (!source) return { error: true, message: `Module ${id} not found` };
+
+        const candidates: Array<{ find: string; type: string; unique: boolean; moduleCount: number; intlKey?: string }> = [];
+        const seen = new Set<string>();
+
+        const addCandidate = (find: string, searchStr: string, type: string, intlKey?: string) => {
+            if (seen.has(find) || find.length < 8) return;
+            seen.add(find);
+            const count = countModuleMatchesFast(searchStr, 3);
+            candidates.push({ find, type, unique: count === 1, moduleCount: count, intlKey });
+        };
+
+        const intlHashPattern = /\.t\.([A-Za-z0-9+/]{6})/g;
+        const intlBracketPattern = /\.t\["([A-Za-z0-9+/]{6,8})"\]/g;
+        for (const regex of [intlHashPattern, intlBracketPattern]) {
+            let m;
+            while ((m = regex.exec(source))) {
+                const hash = m[1];
+                const key = getIntlKeyFromHash(hash);
+                const findStr = key ? `#{intl::${key}}` : `#{intl::${hash}::raw}`;
+                addCandidate(findStr, `.${hash}`, "intl", key ?? undefined);
+            }
+        }
+
+        const stringPattern = /"([^"]{8,60})"/g;
+        let m;
+        while ((m = stringPattern.exec(source))) {
+            const str = m[1];
+            if (/^[a-z0-9_]+$/i.test(str) && !str.includes("\\")) addCandidate(str, str, "string");
+        }
+
+        const propPattern = /([a-zA-Z_$][\w$]{3,30}):/g;
+        const propCounts = new Map<string, number>();
+        while ((m = propPattern.exec(source))) {
+            const prop = m[1];
+            propCounts.set(prop, (propCounts.get(prop) ?? 0) + 1);
+        }
+        for (const [prop] of [...propCounts].filter(([, c]) => c === 1).slice(0, 10)) {
+            addCandidate(`${prop}:`, `${prop}:`, "prop");
+        }
+
+        candidates.sort((a, b) => {
+            if (a.unique !== b.unique) return a.unique ? -1 : 1;
+            const typeOrder = { intl: 0, string: 1, prop: 2 };
+            return (typeOrder[a.type] ?? 3) - (typeOrder[b.type] ?? 3);
+        });
+
+        return { id, sourceSize: source.length, candidateCount: candidates.length, suggestions: candidates.slice(0, 15) };
     }
 
     if (pattern || action === "find") {

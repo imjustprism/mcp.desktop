@@ -27,7 +27,8 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
         const searchStr = str ?? findStr;
         if (!searchStr) return { error: true, message: "str or find required" };
 
-        const moduleIds = searchModulesOptimized(source => source.includes(searchStr), 11);
+        const canonSearch = canonicalizeMatch(searchStr);
+        const moduleIds = searchModulesOptimized(source => source.includes(canonSearch), 11);
         const count = moduleIds.length;
 
         return {
@@ -75,7 +76,7 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
 
             const info: Record<string, unknown> = { index, find: rawFind.slice(0, 200), status, moduleCount, replacements: replacementInfo };
             if (status === "OK") info.moduleId = matchingModules[0];
-            if (status === "NO_MATCH") info.suggestion = "Use suggest action with this find string";
+            if (status === "MULTIPLE_MATCH") info.moduleIds = matchingModules.slice(0, 5);
 
             return info;
         });
@@ -237,6 +238,16 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
         const canonFind = canonicalizeMatch(findStr);
         const moduleIds = searchModulesOptimized(src => src.includes(canonFind), 5);
         const allErrors = [...findAnalysis.errors, ...(matchAnalysis?.errors ?? [])];
+        const allWarnings = [...findAnalysis.warnings, ...(matchAnalysis?.warnings ?? [])];
+
+        if (moduleIds.length === 0) {
+            allErrors.push("Find string matches no modules");
+            findAnalysis.score = Math.max(1, findAnalysis.score - 5);
+        } else if (moduleIds.length > 1) {
+            allWarnings.push(`Find string matches ${moduleIds.length} modules, not unique`);
+            findAnalysis.score = Math.max(1, findAnalysis.score - 3);
+        }
+
         const overallScore = matchAnalysis ? Math.round((findAnalysis.score + matchAnalysis.score) / 2) : findAnalysis.score;
 
         return {
@@ -244,7 +255,7 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             match: matchAnalysis ? { pattern: matchPattern!.slice(0, 200), ...matchAnalysis } : undefined,
             overallScore,
             verdict: allErrors.length ? "BROKEN" : overallScore >= 7 ? "GOOD" : overallScore >= 4 ? "ACCEPTABLE" : "NEEDS_WORK",
-            allWarnings: [...findAnalysis.warnings, ...(matchAnalysis?.warnings ?? [])],
+            allWarnings: allWarnings.length ? allWarnings : undefined,
             allErrors: allErrors.length ? allErrors : undefined
         };
     }

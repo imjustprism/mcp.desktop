@@ -15,9 +15,14 @@ export async function handleSearchTool(args: Record<string, unknown>): Promise<u
 
     if (!pattern) return { error: true, message: "pattern required" };
 
-    const regex = parseRegex(pattern);
-    if (regex || forceRegex) {
-        const searchRegex = regex ?? new RegExp(pattern);
+    let regex: RegExp | null;
+    try {
+        regex = parseRegex(pattern) ?? (forceRegex ? new RegExp(pattern) : null);
+    } catch {
+        return { error: true, message: `Invalid regex: ${pattern}` };
+    }
+    if (regex) {
+        const searchRegex = regex;
         const matches: Array<{ id: string; match: string; context: string }> = [];
         const results = search(searchRegex);
 
@@ -43,6 +48,15 @@ export async function handleSearchTool(args: Record<string, unknown>): Promise<u
     return {
         count: Object.keys(results).length,
         ids,
-        preview: ids.map(id => ({ id, snippet: results[id].toString().slice(0, 200) }))
+        preview: ids.map(id => {
+            const source = getModuleSource(id);
+            const idx = source.indexOf(pattern);
+            if (idx !== -1) {
+                const start = Math.max(0, idx - 50);
+                const end = Math.min(source.length, idx + pattern.length + 50);
+                return { id, snippet: source.slice(start, end) };
+            }
+            return { id, snippet: source.slice(0, 200) };
+        })
     };
 }

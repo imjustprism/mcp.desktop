@@ -9,13 +9,13 @@ import { MCPTool } from "../types";
 export const TOOLS: MCPTool[] = [
     {
         name: "module",
-        description: "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: get source. exports: list with types. context: code around pattern. diff: patched vs original. deps: dependencies. size: bytes. ids: list IDs. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track new modules.",
+        description: "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: get source. exports: list with types. context: code around pattern. diff: patched vs original. deps: dependencies. size: bytes. ids: list IDs. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track new modules. suggest: find string candidates for patching. annotate: source with intl hashes replaced by key names.",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["find", "extract", "exports", "context", "diff", "deps", "size", "ids", "stats", "loadLazy", "watch", "watchGet", "watchStop"],
+                    enum: ["find", "extract", "exports", "context", "diff", "deps", "size", "ids", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "annotate"],
                     description: "Action to perform"
                 },
                 id: {
@@ -472,7 +472,7 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "testPatch",
-        description: "Test patch before writing. Checks find uniqueness, applies match regex, validates captures, previews replacement. Returns VALID/FIND_NOT_UNIQUE/MATCH_FAILED.",
+        description: "Test patch before writing. Checks find uniqueness, applies match regex, validates captures, previews replacement. Shows canonicalized regex, match context, nearby anchors. Returns VALID/FIND_NOT_UNIQUE/MATCH_FAILED.",
         inputSchema: {
             type: "object",
             properties: {

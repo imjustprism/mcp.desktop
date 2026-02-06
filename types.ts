@@ -165,6 +165,7 @@ export interface WebpackExport {
 
 export interface WebpackModule {
     exports: WebpackExport;
+    loaded?: boolean;
 }
 
 export type WebpackModuleFactory = (module: WebpackModule, exports: WebpackExport, require: WebpackRequire) => void;
@@ -363,7 +364,7 @@ export function isToolError(result: ToolResult): result is ToolError {
     return typeof result === "object" && result !== null && "error" in result && result.error === true;
 }
 
-type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "deps" | "size" | "ids" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop";
+type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "deps" | "size" | "ids" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate";
 type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods";
 type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test";
 type FluxAction_ = "events" | "types" | "dispatch" | "listeners";

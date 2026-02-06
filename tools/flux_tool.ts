@@ -55,30 +55,7 @@ export async function handleFluxTool(args: Record<string, unknown>): Promise<unk
         return { found: true, event, storeHandlerCount: storeHandlers.length, storeHandlers: storeHandlers.slice(0, 30), subscriptionCount };
     }
 
-    if (action === "types" || (!action && !event)) {
-        const actionTypesSet = new Set<string>();
-        const actionHandlers = dispatcher._actionHandlers;
-
-        if (actionHandlers?._dependencyGraph?.nodes) {
-            for (const k of Object.keys(actionHandlers._dependencyGraph.nodes)) actionTypesSet.add(k);
-        }
-        if (actionHandlers?._orderedActionHandlers) {
-            for (const k of Object.keys(actionHandlers._orderedActionHandlers)) actionTypesSet.add(k);
-        }
-        if (dispatcher._subscriptions) {
-            for (const k of Object.keys(dispatcher._subscriptions)) actionTypesSet.add(k);
-        }
-
-        let actionTypes = [...actionTypesSet].sort();
-        if (filterPattern) {
-            const lower = filterPattern.toLowerCase();
-            actionTypes = actionTypes.filter(a => a.toLowerCase().includes(lower));
-        }
-
-        return { count: actionTypes.length, actionTypes: actionTypes.slice(0, 30), note: actionTypes.length > 30 ? "Use filter param to narrow results" : undefined };
-    }
-
-    if (action === "events") {
+    if (action === "types" || action === "events" || (!action && !event)) {
         const eventSet = new Set<string>();
         const actionHandlers = dispatcher._actionHandlers;
 

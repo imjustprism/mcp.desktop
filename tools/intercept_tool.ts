@@ -7,7 +7,18 @@
 import { wreq } from "@webpack";
 
 import { FunctionIntercept, InterceptCapture, WebpackModule } from "../types";
-import { cleanupAllIntercepts, cleanupExpiredIntercepts, cleanupIntercept, interceptState } from "./utils";
+import { cleanupAllIntercepts, cleanupExpiredIntercepts, cleanupIntercept, interceptState, serializeResult } from "./utils";
+
+function summarizeIntercept(captures: InterceptCapture[], limit: number) {
+    const sliced = captures.slice(0, limit).map(c => {
+        const summary: Record<string, unknown> = { ts: c.ts };
+        if (c.args.length) summary.args = serializeResult(c.args, 300);
+        if (c.result !== undefined) summary.result = serializeResult(c.result, 200);
+        if (c.error) summary.error = c.error;
+        return summary;
+    });
+    return { captures: sliced, truncated: captures.length > limit || undefined };
+}
 
 export async function handleInterceptTool(args: Record<string, unknown>): Promise<unknown> {
     const action = args.action as string | undefined;
@@ -71,7 +82,8 @@ export async function handleInterceptTool(args: Record<string, unknown>): Promis
 
         try {
             if (actualKey === "module") {
-                Object.defineProperty(wreq.c, moduleId, { value: { exports: wrapper }, configurable: true, writable: true });
+                const originalMod = wreq.c[moduleId];
+                Object.defineProperty(originalMod, "exports", { value: Object.assign(wrapper, target as object), configurable: true, writable: true });
             } else {
                 Object.defineProperty(mod.exports, actualKey, { value: wrapper, configurable: true, writable: true });
             }
@@ -98,15 +110,14 @@ export async function handleInterceptTool(args: Record<string, unknown>): Promis
         const intercept = interceptState.active.get(interceptId);
         if (!intercept) return { error: true, message: `Intercept ${interceptId} not found or expired` };
 
-        const truncated = intercept.captures.length > 30;
+        const summary = summarizeIntercept(intercept.captures, 30);
         return {
             id: interceptId,
             moduleId: intercept.moduleId,
             exportKey: intercept.exportKey,
             captureCount: intercept.captures.length,
             remaining: Math.max(0, intercept.expiresAt - Date.now()),
-            captures: intercept.captures.slice(0, 30),
-            truncated: truncated || undefined
+            ...summary
         };
     }
 
@@ -122,7 +133,8 @@ export async function handleInterceptTool(args: Record<string, unknown>): Promis
 
         const { captures } = intercept;
         cleanupIntercept(interceptId);
-        return { id: interceptId, stopped: true, captureCount: captures.length, captures: captures.slice(0, 50) };
+        const summary = summarizeIntercept(captures, 50);
+        return { id: interceptId, stopped: true, captureCount: captures.length, ...summary };
     }
 
     return { error: true, message: "action: set (with moduleId, exportKey), get (with optional id), stop (with optional id)" };

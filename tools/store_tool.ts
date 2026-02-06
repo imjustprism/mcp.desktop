@@ -7,7 +7,7 @@
 import { FluxDispatcher } from "@webpack/common";
 
 import { FluxDispatcherInternal, StoreToolArgs, ToolResult } from "../types";
-import { findStore, getAllStoreNames } from "./utils";
+import { findStore, getAllStoreNames, serializeResult } from "./utils";
 
 export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> {
     const { action, name: storeName, method, args: methodArgs } = args;
@@ -35,7 +35,7 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
             resolvedName = storeName + "Store";
             try {
                 store = findStore(resolvedName as Parameters<typeof findStore>[0]) as Record<string, unknown>;
-            } catch { }
+            } catch { store = null; }
         }
     }
 
@@ -45,6 +45,28 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         const starts = validStores.filter(s => s.toLowerCase().startsWith(lower));
         const contains = validStores.filter(s => s.toLowerCase().includes(lower) && !s.toLowerCase().startsWith(lower));
         const suggestions = [...starts, ...contains].slice(0, 10);
+
+        if (!suggestions.length) {
+            const methodMatches: Array<{ store: string; method: string }> = [];
+            for (const sn of validStores) {
+                if (methodMatches.length >= 10) break;
+                try {
+                    const s = findStore(sn as Parameters<typeof findStore>[0]) as Record<string, unknown>;
+                    const proto = Object.getPrototypeOf(s);
+                    const names = [...Object.getOwnPropertyNames(proto), ...Object.getOwnPropertyNames(s)];
+                    for (const nm of names) {
+                        if (nm.toLowerCase().includes(lower)) {
+                            methodMatches.push({ store: sn, method: nm });
+                            break;
+                        }
+                    }
+                } catch { continue; }
+            }
+            if (methodMatches.length) {
+                return { error: true, message: `Store "${storeName}" not found, but found matching methods`, methodMatches };
+            }
+        }
+
         return { error: true, message: `Store "${storeName}" not found`, suggestions: suggestions.length ? suggestions : undefined };
     }
 
@@ -111,16 +133,13 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
     if ((action === "call" || action === "state") && method) {
         const desc = Object.getOwnPropertyDescriptor(store, method) ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(store), method);
 
+        const cap = (v: unknown) => typeof v === "object" && v !== null ? serializeResult(v, 3000) : v;
+        const typeOf = (v: unknown) => v === null ? "null" : v === undefined ? "undefined" : Array.isArray(v) ? "array" : typeof v;
+
         if (desc?.get) {
             try {
                 const value = desc.get.call(store);
-                return {
-                    found: true,
-                    property: method,
-                    isGetter: true,
-                    value,
-                    valueType: value === null ? "null" : value === undefined ? "undefined" : Array.isArray(value) ? "array" : typeof value
-                };
+                return { found: true, property: method, isGetter: true, value: cap(value), valueType: typeOf(value) };
             } catch (e) {
                 return { found: true, property: method, isGetter: true, error: `Getter threw: ${e instanceof Error ? e.message : String(e)}` };
             }
@@ -130,18 +149,13 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         if (typeof fn === "function") {
             try {
                 const value = (fn as (...args: unknown[]) => unknown).apply(store, methodArgs ?? []);
-                return {
-                    found: true,
-                    method,
-                    value,
-                    valueType: value === null ? "null" : value === undefined ? "undefined" : Array.isArray(value) ? "array" : typeof value
-                };
+                return { found: true, method, value: cap(value), valueType: typeOf(value) };
             } catch (e) {
                 return { found: true, method, error: `Method threw: ${e instanceof Error ? e.message : String(e)}` };
             }
         }
 
-        if (fn !== undefined) return { found: true, property: method, value: fn, valueType: typeof fn };
+        if (fn !== undefined) return { found: true, property: method, value: cap(fn), valueType: typeof fn };
         return { found: true, error: `"${method}" not found on store` };
     }
 

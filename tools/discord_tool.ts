@@ -8,7 +8,7 @@ import { findAll } from "@webpack";
 import { ChannelStore, GuildStore, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
 
 import { DiscordAPIError, DiscordToolArgs, GatewaySocket, ToolResult } from "../types";
-import { findStore } from "./utils";
+import { findStore, serializeResult } from "./utils";
 
 export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResult> {
     const { action, method, endpoint, body, id, filter: filterPattern, memberName } = args;
@@ -21,7 +21,10 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
 
         try {
             const response = await apiCall({ url: endpoint, body });
-            return { status: response.status, body: response.body };
+            const respBody = typeof response.body === "object" && response.body !== null
+                ? serializeResult(response.body, 5000)
+                : response.body;
+            return { status: response.status, body: respBody };
         } catch (e) {
             const err = e as DiscordAPIError;
             return { error: true, status: err.status ?? err.httpStatus, message: err.body?.message ?? err.message ?? String(e) };
@@ -140,6 +143,16 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             .map(r => ({ name: r.name.split("/").pop()?.slice(0, 50) ?? "", duration: Math.round(r.duration) }));
 
         return { pageLoadMs: pageLoad, domReadyMs: domReady, resources: resourceStats, now: Math.round(performance.now()) };
+    }
+
+    if (action === "waitForIpc") {
+        const timeout = args.timeout ?? 10000;
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+            if (UserStore.getCurrentUser()) return { ready: true, elapsed: Date.now() - start };
+            await new Promise(r => setTimeout(r, 200));
+        }
+        return { ready: false, elapsed: Date.now() - start, message: "Timed out waiting for Discord to be ready" };
     }
 
     if (action === "gateway") {

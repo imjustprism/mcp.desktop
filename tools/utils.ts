@@ -387,7 +387,11 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, toolName: string
 export function parseRegex(pattern: string): RegExp | null {
     if (pattern.startsWith("/") && pattern.lastIndexOf("/") > 0) {
         const lastSlash = pattern.lastIndexOf("/");
-        return getCachedRegex(pattern.slice(1, lastSlash), pattern.slice(lastSlash + 1));
+        try {
+            return getCachedRegex(pattern.slice(1, lastSlash), pattern.slice(lastSlash + 1));
+        } catch {
+            throw new Error(`Invalid regex: ${pattern}`);
+        }
     }
     return null;
 }
@@ -397,14 +401,14 @@ export function cleanupIntercept(id: number): boolean {
     if (!intercept) return false;
 
     const mod = wreq.c[intercept.moduleId] as WebpackModule | undefined;
-    if (mod?.exports) {
+    if (mod) {
         try {
             if (intercept.exportKey === "module") {
-                Object.defineProperty(wreq.c, intercept.moduleId, { value: { exports: intercept.original }, configurable: true, writable: true });
-            } else {
+                Object.defineProperty(mod, "exports", { value: intercept.original, configurable: true, writable: true });
+            } else if (mod.exports) {
                 Object.defineProperty(mod.exports, intercept.exportKey, { value: intercept.original, configurable: true, writable: true });
             }
-        } catch { }
+        } catch { /* shhhh */ }
     }
     interceptState.active.delete(id);
     return true;

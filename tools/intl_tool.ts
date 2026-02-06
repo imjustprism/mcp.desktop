@@ -314,34 +314,37 @@ export async function handleIntlTool(args: Record<string, unknown>): Promise<unk
         if (!query) return { error: true, message: "query required" };
 
         const searchTerms = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
+        const queryLower = query.toLowerCase();
         const locale = getLocaleMessages();
         if (!locale) return { query, count: 0, matches: [] };
 
         const hashMap = buildIntlHashToKeyMap();
-        const matches: Array<{ hash: string; message: string; key?: string }> = [];
+        const exact: Array<{ hash: string; message: string; key?: string }> = [];
+        const partial: Array<{ hash: string; message: string; key?: string }> = [];
 
         for (const [h, arr] of Object.entries(locale)) {
-            if (matches.length >= limit) break;
-
             const text = extractIntlText(arr);
             if (!text) continue;
 
             const lower = text.toLowerCase();
             const isMatch = searchTerms.length > 1
                 ? searchTerms.every(term => lower.includes(term))
-                : lower.includes(query.toLowerCase());
+                : lower.includes(queryLower);
 
-            if (isMatch) {
-                const entry: { hash: string; message: string; key?: string } = {
-                    hash: h,
-                    message: text.slice(0, 200)
-                };
-                const known = hashMap.get(h);
-                if (known) entry.key = known;
-                matches.push(entry);
-            }
+            if (!isMatch) continue;
+
+            const entry: { hash: string; message: string; key?: string } = {
+                hash: h,
+                message: text.slice(0, 200)
+            };
+            const known = hashMap.get(h);
+            if (known) entry.key = known;
+
+            if (lower === queryLower) exact.push(entry);
+            else partial.push(entry);
         }
 
+        const matches = [...exact, ...partial].slice(0, limit);
         return { query, count: matches.length, matches };
     }
 
