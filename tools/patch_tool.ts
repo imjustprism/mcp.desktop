@@ -6,7 +6,9 @@
 
 import { canonicalizeMatch } from "@utils/patches";
 
-import { VencordPlugin } from "../types";
+import { PatchToolArgs, VencordPlugin } from "../types";
+import { plugins } from "../webpack";
+import { createIntlKeyPatternRegex, FORBIDDEN_PATCH_PATTERNS, MINIFIED_VARS_PATTERN } from "./constants";
 import {
     batchCountModuleMatches,
     intlHashExistsInDefinitions,
@@ -14,14 +16,10 @@ import {
     searchModulesOptimized,
 } from "./utils";
 
-const MINIFIED_VARS = /(?<![a-zA-Z_$])([etnirsoclu])(?=\s*[,)}:.]|$)/g;
-const FORBIDDEN_PATTERNS = [/\be,t,n\b/, /function\s*\(\s*e\s*\)/, /return!0/, /return!1/];
+const intlKeyPattern = createIntlKeyPatternRegex();
 
-export async function handlePatchTool(args: Record<string, unknown>): Promise<unknown> {
-    const action = args.action as string | undefined;
-    const findStr = args.find as string | undefined;
-    const str = args.str as string | undefined;
-    const pluginName = args.pluginName as string | undefined;
+export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
+    const { action, find: findStr, str, pluginName } = args;
 
     if (action === "unique" || (str && !action)) {
         const searchStr = str ?? findStr;
@@ -36,14 +34,13 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             count,
             unique: count === 1,
             moduleIds: moduleIds.slice(0, 10),
-            valid: count === 1 ? "Safe to use as find string" : count === 0 ? "No modules found" : `Found in ${count} modules, not unique`
+            valid: count === 1 ? "Unique" : count === 0 ? "No matches" : `${count} modules, not unique`
         };
     }
 
     if (action === "plugin") {
         if (!pluginName) return { error: true, message: "pluginName required" };
 
-        const { plugins } = Vencord.Plugins;
         const plugin = plugins[pluginName] as VencordPlugin | undefined;
 
         if (!plugin) {
@@ -78,6 +75,17 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             if (status === "OK") info.moduleId = matchingModules[0];
             if (status === "MULTIPLE_MATCH") info.moduleIds = matchingModules.slice(0, 5);
 
+            if (status !== "OK" && rawFind.includes("#{intl::")) {
+                if (canonFind !== rawFind) info.canonicalizedFind = canonFind.slice(0, 100);
+                const intlMatch = rawFind.match(intlKeyPattern);
+                if (intlMatch?.[1]) {
+                    info.intlKey = intlMatch[1];
+                    const hash = runtimeHashMessageKey(intlMatch[1]);
+                    const exists = intlHashExistsInDefinitions(hash);
+                    info.intlStatus = exists ? "key_valid_but_unused" : "key_not_found";
+                }
+            }
+
             return info;
         });
 
@@ -94,13 +102,13 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
 
     if (action === "analyze") {
         const pluginFilter = pluginName;
-        const showNoMatch = args.showNoMatch as boolean ?? true;
-        const showMultiMatch = args.showMultiMatch as boolean ?? true;
-        const showValid = args.showValid as boolean ?? false;
+        const showNoMatch = args.showNoMatch ?? true;
+        const showMultiMatch = args.showMultiMatch ?? true;
+        const showValid = args.showValid ?? false;
 
-        const { plugins } = Vencord.Plugins;
         const issues: Array<{
             plugin: string;
+            enabled?: boolean;
             patchIndex: number;
             find: string;
             canonicalizedFind?: string;
@@ -113,28 +121,28 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
         }> = [];
 
         const stats = { totalPlugins: 0, totalPatches: 0, noMatch: 0, multiMatch: 0, slowPatches: 0, validPatches: 0 };
-        const patchInfos: Array<{ plugin: string; patchIndex: number; rawFind: string; canonFind: string; intlKey?: string }> = [];
-        const intlKeyPattern = /#\{intl::([A-Z][A-Z0-9_]*)/;
+        const patchInfos: Array<{ plugin: string; enabled: boolean; patchIndex: number; rawFind: string; canonFind: string; intlKey?: string }> = [];
 
         for (const [nm, plugin] of Object.entries(plugins) as [string, VencordPlugin][]) {
             if (pluginFilter && !nm.toLowerCase().includes(pluginFilter.toLowerCase())) continue;
             if (!plugin.patches?.length) continue;
 
             stats.totalPlugins++;
+            const enabled = plugin.started ?? false;
             for (let i = 0; i < plugin.patches.length; i++) {
                 const patch = plugin.patches[i];
                 stats.totalPatches++;
 
                 const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
                 const intlMatch = rawFind.match(intlKeyPattern);
-                patchInfos.push({ plugin: nm, patchIndex: i, rawFind, canonFind: canonicalizeMatch(rawFind), intlKey: intlMatch?.[1] });
+                patchInfos.push({ plugin: nm, enabled, patchIndex: i, rawFind, canonFind: canonicalizeMatch(rawFind), intlKey: intlMatch?.[1] });
             }
         }
 
         const uniqueFinds = [...new Set(patchInfos.map(p => p.canonFind))];
         const batchResults = batchCountModuleMatches(uniqueFinds, 11);
 
-        for (const { plugin: nm, patchIndex: i, rawFind, canonFind, intlKey } of patchInfos) {
+        for (const { plugin: nm, enabled, patchIndex: i, rawFind, canonFind, intlKey } of patchInfos) {
             const { count: moduleCount } = batchResults.get(canonFind) ?? { count: 0 };
             const usesIntl = rawFind.includes("#{intl::");
             const displayFind = usesIntl ? rawFind.slice(0, 100) : canonFind.slice(0, 100);
@@ -142,7 +150,7 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             if (moduleCount === 0) {
                 stats.noMatch++;
                 if (showNoMatch) {
-                    const issue: typeof issues[0] = { plugin: nm, patchIndex: i, find: displayFind, issue: "NO_MATCH", severity: "error", moduleCount: 0, details: "Find string doesn't match any module" };
+                    const issue: typeof issues[0] = { plugin: nm, enabled: enabled ? true : undefined, patchIndex: i, find: displayFind, issue: "NO_MATCH", severity: "error", moduleCount: 0, details: "Find matches no modules" };
 
                     if (usesIntl && canonFind !== rawFind) {
                         issue.canonicalizedFind = canonFind.slice(0, 100);
@@ -151,7 +159,7 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
                             const hash = runtimeHashMessageKey(intlKey);
                             const exists = intlHashExistsInDefinitions(hash);
                             issue.intlStatus = exists ? "key_valid_but_unused" : "key_not_found";
-                            issue.details = exists ? "Intl key exists but is no longer used in Discord's code" : "Intl key not found in definitions";
+                            issue.details = exists ? "Intl key valid but unused in Discord code" : "Intl key not in definitions";
                         }
                     }
                     issues.push(issue);
@@ -159,14 +167,14 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             } else if (moduleCount > 1) {
                 stats.multiMatch++;
                 if (showMultiMatch) {
-                    const issue: typeof issues[0] = { plugin: nm, patchIndex: i, find: displayFind, issue: "MULTIPLE_MATCH", severity: "warning", moduleCount, details: `Find string matches ${moduleCount}+ modules` };
+                    const issue: typeof issues[0] = { plugin: nm, enabled: enabled ? true : undefined, patchIndex: i, find: displayFind, issue: "MULTIPLE_MATCH", severity: "warning", moduleCount, details: `Matches ${moduleCount}+ modules` };
                     if (usesIntl && canonFind !== rawFind) issue.canonicalizedFind = canonFind.slice(0, 100);
                     issues.push(issue);
                 }
             } else {
                 stats.validPatches++;
                 if (showValid) {
-                    const issue: typeof issues[0] = { plugin: nm, patchIndex: i, find: displayFind, issue: "OK", severity: "info", moduleCount: 1 };
+                    const issue: typeof issues[0] = { plugin: nm, enabled: enabled ? true : undefined, patchIndex: i, find: displayFind, issue: "OK", severity: "info", moduleCount: 1 };
                     if (usesIntl && canonFind !== rawFind) issue.canonicalizedFind = canonFind.slice(0, 100);
                     issues.push(issue);
                 }
@@ -177,9 +185,9 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
     }
 
     if (action === "lint") {
-        if (!findStr) return { error: true, message: "find required for lint" };
+        if (!findStr) return { error: true, message: "find required" };
 
-        const matchPattern = args.match as string | undefined;
+        const matchPattern = args.match;
 
         const analyzePattern = (pattern: string, isFind: boolean) => {
             const warnings: string[] = [];
@@ -193,13 +201,13 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             if (pattern.includes("\\i")) { anchors.push("identifier"); score += 1; }
             if (/\(\?<=/.test(pattern)) { anchors.push("lookbehind"); score += 1; }
 
-            const minifiedMatches = pattern.match(MINIFIED_VARS);
+            const minifiedMatches = pattern.match(MINIFIED_VARS_PATTERN);
             if (minifiedMatches && !pattern.includes("\\i")) {
-                errors.push(`Hardcoded minified vars: ${[...new Set(minifiedMatches)].join(", ")}, use \\i`);
+                errors.push(`Hardcoded minified vars: ${[...new Set(minifiedMatches)].join(", ")}`);
                 score -= 3;
             }
 
-            for (const forbidden of FORBIDDEN_PATTERNS) {
+            for (const forbidden of FORBIDDEN_PATCH_PATTERNS) {
                 if (forbidden.test(pattern)) {
                     errors.push(`Forbidden pattern: ${forbidden.source}`);
                     score -= 2;
@@ -207,7 +215,7 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             }
 
             if (isFind && pattern.length < 20 && !pattern.includes("#{intl::")) {
-                warnings.push("Find string < 20 chars, may not be unique");
+                warnings.push("Find < 20 chars, may not be unique");
                 score -= 1;
             }
 
@@ -217,17 +225,17 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
             }
 
             if (/\.\+\??|\.\*\??/.test(pattern) && !/\.\{/.test(pattern)) {
-                warnings.push("Uses unbounded wildcards, prefer .{0,N}");
+                warnings.push("Unbounded wildcards, use .{0,N}");
                 score -= 1;
             }
 
-            if (pattern.length > 200) { warnings.push("Pattern > 200 chars, consider shorter anchor"); score -= 1; }
+            if (pattern.length > 200) { warnings.push("> 200 chars, shorten"); score -= 1; }
 
             let captures = 0;
             for (let i = 0; i < pattern.length - 1; i++) {
                 if (pattern[i] === "(" && pattern[i + 1] !== "?") captures++;
             }
-            if (captures > 3) { warnings.push(`${captures} capture groups, max 3 recommended`); score -= 1; }
+            if (captures > 3) { warnings.push(`${captures} captures, max 3`); score -= 1; }
             if (!anchors.length) { warnings.push("No strong anchors detected"); score -= 1; }
 
             return { score: Math.max(1, Math.min(10, score)), anchors, warnings, errors };
@@ -241,10 +249,10 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
         const allWarnings = [...findAnalysis.warnings, ...(matchAnalysis?.warnings ?? [])];
 
         if (moduleIds.length === 0) {
-            allErrors.push("Find string matches no modules");
+            allErrors.push("Find matches no modules");
             findAnalysis.score = Math.max(1, findAnalysis.score - 5);
         } else if (moduleIds.length > 1) {
-            allWarnings.push(`Find string matches ${moduleIds.length} modules, not unique`);
+            allWarnings.push(`Find matches ${moduleIds.length} modules`);
             findAnalysis.score = Math.max(1, findAnalysis.score - 3);
         }
 
@@ -260,5 +268,5 @@ export async function handlePatchTool(args: Record<string, unknown>): Promise<un
         };
     }
 
-    return { error: true, message: "action: unique (with str), plugin (with pluginName), analyze, lint (with find). For testing patches use testPatch tool." };
+    return { error: true, message: "action: unique, plugin, analyze, lint" };
 }

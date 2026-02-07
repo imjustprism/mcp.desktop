@@ -5,26 +5,33 @@
  */
 
 import { canonicalizeMatch } from "@utils/patches";
-import { factoryListeners, filters, wreq } from "@webpack";
-import { Flux } from "@webpack/common";
 import { loadLazyChunks } from "debug/loadLazyChunks";
 
-import { ModuleToolArgs, ModuleWatch, ToolResult, WebpackExport, WebpackModule } from "../types";
+import { AnchorCandidate, CompEntry, ModuleMatch, ModuleToolArgs, ModuleWatch, SuggestCandidate, ToolResult, WebpackExport, WebpackModule } from "../types";
+import { DesignTokensModule, factoryListeners, filters, Flux, getCommonModules, UIBarrelModule, wreq } from "../webpack";
+import { ANCHOR_TYPE_ORDER, CONTEXT, createIntlHashBracketRegex, createIntlHashDotRegex, ENUM_MEMBER_RE, FUNC_CALL_RE, ICON_DETECT_RE, IDENT_ASSIGN_RE, LIMITS, MANA_COMPONENT_SINGLE_RE, NOISE_STRINGS, STORE_NAME_RE, STRING_LITERAL_RE } from "./constants";
 import {
     clearBatchResultsCache,
+    clearComponentIndexCache,
+    clearCSSIndexCache,
     clearModuleSourceCache,
+    compareByAnchorType,
     countModuleMatchesFast,
     extractModule,
+    extractPropsFromFunction,
+    getComponentIndex,
+    getCSSIndex,
+    getCSSModuleStats,
     getIntlKeyFromHash,
     getModulePatchedBy,
     getModuleSource,
     invalidateModuleIdCache,
+    isRenderedClassName,
     moduleWatchState,
     parseRegex,
+    scanSingleOccurrences,
     searchModulesOptimized,
 } from "./utils";
-
-type ModuleMatch = { id: string; exports: unknown; key: string };
 
 function findModulesWithIds(filter: (m: unknown) => boolean, max: number): ModuleMatch[] {
     const results: ModuleMatch[] = [];
@@ -71,7 +78,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     }
 
     if (action === "loadLazy") {
-        if (moduleWatchState.isLoadingLazy) return { error: true, message: "Lazy chunk loading already in progress" };
+        if (moduleWatchState.isLoadingLazy) return { error: true, message: "Lazy load already in progress" };
 
         const modulesBefore = Object.keys(wreq.m).length;
         const loadedBefore = Object.keys(wreq.c).length;
@@ -87,6 +94,8 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             invalidateModuleIdCache();
             clearModuleSourceCache();
             clearBatchResultsCache();
+            clearCSSIndexCache();
+            clearComponentIndexCache();
 
             moduleWatchState.lastLazyLoadResult = { loadedAt: Date.now(), modulesBefore, modulesAfter, newModules };
 
@@ -98,7 +107,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 loadedBefore,
                 loadedAfter,
                 newLoaded,
-                message: newModules > 0 ? `Loaded ${newModules} new module factories and ${newLoaded} new module instances` : "All lazy chunks were already loaded"
+                message: newModules > 0 ? `Loaded ${newModules} factories, ${newLoaded} instances` : "Lazy chunks already loaded"
             };
         } finally {
             moduleWatchState.isLoadingLazy = false;
@@ -167,7 +176,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             newModuleCount: watch.newModules.length,
             remaining: Math.max(0, watch.expiresAt - Date.now()),
             newModules: watch.newModules.slice(0, 50),
-            truncated: truncated || undefined
+            truncated: truncated ? true : undefined
         };
     }
 
@@ -208,7 +217,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
 
     if (action === "exports" && id) {
         const mod = wreq.c[id] as WebpackModule | undefined;
-        if (!mod?.exports) return { found: false, message: `Module ${id} not found or not loaded` };
+        if (!mod?.exports) return { found: false, message: `Module ${id} not loaded` };
 
         const exp = mod.exports;
         const exports: Record<string, { type: string; displayName?: string; preview?: string }> = {};
@@ -232,7 +241,10 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const source = getModuleSource(id);
         if (!source) return { found: false, message: `Module ${id} not found` };
 
-        const searchPattern = parseRegex(pattern) ?? new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        const parsed = parseRegex(pattern);
+        const searchPattern = parsed
+            ? canonicalizeMatch(parsed)
+            : new RegExp(canonicalizeMatch(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
         const match = source.match(searchPattern);
         if (!match?.index) return { found: false, pattern, message: "Pattern not found in module" };
 
@@ -249,7 +261,52 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const patchedBy = getModulePatchedBy(id);
         if (!patchedBy.length) return { id, patched: false };
 
-        return { found: true, id, hasPatches: true, patchedBy, originalSize: original.length, patchedSize: patched.length, original: original.slice(0, maxLength), patched: patched.slice(0, maxLength) };
+        const patchedClean = patched.startsWith("//") ? patched.slice(patched.indexOf("\n") + 1) : patched;
+
+        const pad = LIMITS.MODULE.DIFF_CONTEXT_PAD;
+        const maxRegionLen = LIMITS.MODULE.DIFF_MAX_REGION_LEN;
+        const changes: Array<{ offset: number; original: string; patched: string }> = [];
+
+        let oi = 0, pi = 0;
+        while (oi < original.length && pi < patchedClean.length) {
+            if (original[oi] === patchedClean[pi]) { oi++; pi++; continue; }
+
+            const changeStart = oi;
+            const pChangeStart = pi;
+
+            let bestOEnd = -1, bestPEnd = -1;
+            for (let look = 1; look <= LIMITS.MODULE.DIFF_RESYNC_WINDOW && bestOEnd < 0; look++) {
+                for (let oShift = 0; oShift <= look; oShift++) {
+                    const pShift = look - oShift;
+                    const oPos = oi + oShift;
+                    const pPos = pi + pShift;
+                    if (oPos >= original.length || pPos >= patchedClean.length) continue;
+                    let match = 0;
+                    while (match < LIMITS.MODULE.DIFF_RESYNC_MATCH && oPos + match < original.length && pPos + match < patchedClean.length && original[oPos + match] === patchedClean[pPos + match]) match++;
+                    if (match >= LIMITS.MODULE.DIFF_RESYNC_MATCH) { bestOEnd = oPos; bestPEnd = pPos; break; }
+                }
+            }
+
+            if (bestOEnd < 0) {
+                changes.push({
+                    offset: changeStart,
+                    original: original.slice(Math.max(0, changeStart - pad), original.length).slice(0, maxRegionLen),
+                    patched: patchedClean.slice(Math.max(0, pChangeStart - pad), patchedClean.length).slice(0, maxRegionLen)
+                });
+                break;
+            }
+
+            const oSlice = original.slice(Math.max(0, changeStart - pad), bestOEnd + pad).slice(0, maxRegionLen);
+            const pSlice = patchedClean.slice(Math.max(0, pChangeStart - pad), bestPEnd + pad).slice(0, maxRegionLen);
+            changes.push({ offset: changeStart, original: oSlice, patched: pSlice });
+
+            oi = bestOEnd;
+            pi = bestPEnd;
+
+            if (changes.length >= LIMITS.MODULE.DIFF_MAX_REGIONS) break;
+        }
+
+        return { found: true, id, hasPatches: true, patchedBy, originalSize: original.length, patchedSize: patchedClean.length, changeCount: changes.length, changes };
     }
 
     if (action === "deps" && id) {
@@ -353,21 +410,182 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         return { count: matches.length, matches };
     }
 
+    if (action === "components") {
+        const idx = getComponentIndex();
+
+        if (id) {
+            const mod = wreq.c[id] as WebpackModule | undefined;
+            if (!mod?.exports) return { error: true, message: `Module ${id} not loaded` };
+            const exp = mod.exports;
+            const nonIcons: CompEntry[] = [];
+            const iconKeys: string[] = [];
+
+            const checkFn = (val: unknown, key: string) => {
+                if (typeof val !== "function") return;
+                const fn = val as Function & { displayName?: string };
+                const src = fn.toString().slice(0, 500);
+                if (ICON_DETECT_RE.test(src.slice(0, 200))) { iconKeys.push(key); return; }
+                const entry: CompEntry = { key };
+                if (fn.displayName) entry.displayName = fn.displayName;
+                const props = extractPropsFromFunction(fn);
+                if (props.length) entry.props = props;
+                const manaMatch = src.match(MANA_COMPONENT_SINGLE_RE);
+                if (manaMatch) entry.manaType = manaMatch[1];
+                if (entry.displayName || entry.props?.length || entry.manaType) nonIcons.push(entry);
+            };
+
+            checkFn(exp, "module");
+            checkFn(exp.default, "default");
+            if (typeof exp === "object") {
+                for (const [k, v] of Object.entries(exp)) {
+                    if (k !== "default") checkFn(v, k);
+                }
+            }
+
+            const components = nonIcons.slice(0, LIMITS.COMPONENT.MAX_MATCHES);
+
+            const storyMatch = idx.stories.find(s => s.moduleId === id);
+            return { moduleId: id, componentCount: nonIcons.length, iconCount: iconKeys.length, components, story: storyMatch ?? undefined };
+        }
+
+        if (className) {
+            const lower = className.toLowerCase();
+            const matches: Array<{ name: string; source: string; moduleId?: string; docs?: string; manaType?: string; controls?: Record<string, unknown> }> = [];
+
+            for (const story of idx.stories) {
+                if (matches.length >= LIMITS.COMPONENT.MAX_MATCHES) break;
+                if (story.title.toLowerCase().includes(lower) || story.name.toLowerCase().includes(lower)) {
+                    const mana = [...idx.manaTypes.entries()].find(([type]) => story.name.toLowerCase().includes(type) || story.title.toLowerCase().includes(type));
+                    matches.push({
+                        name: story.name,
+                        source: "story",
+                        moduleId: story.moduleId,
+                        docs: story.docs,
+                        manaType: mana?.[0],
+                        controls: Object.keys(story.controls).length ? story.controls : undefined,
+                    });
+                }
+            }
+
+            for (const [type, moduleIds] of idx.manaTypes) {
+                if (matches.length >= LIMITS.COMPONENT.MAX_MATCHES) break;
+                if (type.toLowerCase().includes(lower)) {
+                    if (!matches.some(m => m.manaType === type)) {
+                        matches.push({ name: type, source: "mana", moduleId: moduleIds[0], manaType: type });
+                    }
+                }
+            }
+
+            for (const [dn, locations] of idx.displayNames) {
+                if (matches.length >= LIMITS.COMPONENT.MAX_MATCHES) break;
+                if (dn.toLowerCase().includes(lower)) {
+                    if (!matches.some(m => m.name === dn)) {
+                        matches.push({ name: dn, source: "displayName", moduleId: locations[0].moduleId });
+                    }
+                }
+            }
+
+            if (UIBarrelModule) {
+                for (const [key] of Object.entries(UIBarrelModule)) {
+                    if (matches.length >= LIMITS.COMPONENT.MAX_MATCHES) break;
+                    if (key.toLowerCase().includes(lower) && !matches.some(m => m.name === key)) {
+                        matches.push({ name: key, source: "uiBarrel", moduleId: idx.uiBarrelId ?? undefined });
+                    }
+                }
+            }
+
+            return { query: className, count: matches.length, matches };
+        }
+
+        return {
+            stories: { count: idx.stories.length, titles: [...new Set(idx.stories.map(s => s.title))].slice(0, 30) },
+            manaComponents: [...idx.manaTypes.keys()],
+            displayNameComponents: idx.displayNames.size,
+            uiBarrel: { moduleId: idx.uiBarrelId, ...idx.uiBarrelStats },
+            iconsModule: { moduleId: idx.iconsModuleId, count: idx.uiBarrelStats.icons },
+        };
+    }
+
+    if (action === "css") {
+        if (className) {
+            const { index, modules } = getCSSIndex();
+            const lower = className.toLowerCase();
+            const matches: Array<{ moduleId: string; hash: string; classCount: number; matchingClasses: Record<string, string> }> = [];
+
+            for (const [modId, info] of modules) {
+                const matching: Record<string, string> = {};
+                for (const [k, v] of Object.entries(info.classes)) {
+                    if (v.toLowerCase().includes(lower) || k.toLowerCase().includes(lower)) matching[k] = v;
+                }
+                if (Object.keys(matching).length) {
+                    matches.push({ moduleId: modId, hash: info.hash, classCount: info.classCount, matchingClasses: matching });
+                    if (matches.length >= limit) break;
+                }
+            }
+
+            return { totalIndexed: index.size, count: matches.length, matches };
+        }
+
+        const stats = getCSSModuleStats();
+
+        const tokenInfo: Record<string, unknown> = {};
+        if (DesignTokensModule) {
+            tokenInfo.semanticColors = Object.keys(DesignTokensModule.colors ?? {}).length;
+            tokenInfo.rawColors = Object.keys(DesignTokensModule.unsafe_rawColors ?? {}).length;
+            tokenInfo.radii = DesignTokensModule.radii;
+            tokenInfo.spacing = DesignTokensModule.spacing;
+        }
+        if (DesignTokensModule?.shadows) {
+            tokenInfo.shadows = Object.keys(DesignTokensModule.shadows).length;
+        }
+
+        return { ...stats, designTokens: Object.keys(tokenInfo).length ? tokenInfo : undefined };
+    }
+
     if (className) {
+        if (isRenderedClassName(className)) {
+            const { index, modules } = getCSSIndex();
+            const entry = index.get(className);
+            if (entry) {
+                const modInfo = modules.get(entry.moduleId);
+                const allClasses = modInfo ? Object.fromEntries(
+                    Object.entries(modInfo.classes).slice(0, LIMITS.CSS.MAX_CLASSES_PER_MODULE)
+                ) : {};
+                return {
+                    found: true,
+                    reverse: true,
+                    moduleId: entry.moduleId,
+                    hash: entry.hash,
+                    matchedClass: { key: entry.key, value: className, semantic: entry.semantic },
+                    classCount: modInfo?.classCount ?? 0,
+                    allClasses,
+                };
+            }
+        }
+
         const lower = className.toLowerCase();
         const filter = (m: unknown) => {
             if (!m || typeof m !== "object") return false;
             const keys = Object.keys(m);
-            return keys.length > 0 && keys.some(k => typeof (m as Record<string, unknown>)[k] === "string" && ((m as Record<string, unknown>)[k] as string).includes("_") && k.toLowerCase().includes(lower));
+            return keys.length > 0 && keys.some(k => {
+                const v = (m as Record<string, unknown>)[k];
+                if (typeof v !== "string") return false;
+                return k.toLowerCase().includes(lower) || v.toLowerCase().includes(lower);
+            });
         };
         const mods = findModulesWithIds(filter, limit);
 
         const matches = mods.map(m => {
             const obj = m.exports as Record<string, string>;
-            const keys = Object.keys(obj);
-            const matchingClasses = keys.filter(k => k.toLowerCase().includes(lower) && typeof obj[k] === "string");
             const classes: Record<string, string> = {};
-            for (const k of matchingClasses.slice(0, 10)) classes[k] = obj[k];
+            for (const k of Object.keys(obj)) {
+                const v = obj[k];
+                if (typeof v !== "string") continue;
+                if (k.toLowerCase().includes(lower) || v.toLowerCase().includes(lower)) {
+                    classes[k] = v;
+                    if (Object.keys(classes).length >= 10) break;
+                }
+            }
             return { moduleId: m.id, classes };
         });
 
@@ -377,7 +595,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     if (exportName) {
         const matches: Array<{ moduleId: string; exportKey: string; type: string; displayName?: string; source?: string }> = [];
 
-        const common = (Vencord as unknown as { Webpack?: { Common?: Record<string, unknown> } }).Webpack?.Common ?? {};
+        const common = getCommonModules();
         const commonValue = common[exportName] as WebpackExport | undefined;
         let commonModuleId: string | undefined;
 
@@ -446,7 +664,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             inWebpackCommon: !!commonValue,
             count: matches.length,
             matches,
-            tip: matches.length ? (commonValue ? `Available as Vencord.Webpack.Common.${exportName}` : undefined) : (commonValue ? `Found in Webpack.Common but module ID could not be resolved. Use Vencord.Webpack.Common.${exportName}` : `No export named "${exportName}" found`)
+            tip: matches.length ? (commonValue ? `Webpack.Common.${exportName}` : undefined) : (commonValue ? "In Webpack.Common but module ID unresolved" : `No export "${exportName}" found`)
         };
     }
 
@@ -467,18 +685,15 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         if (!source) return { error: true, message: `Module ${id} not found` };
 
         const annotations: Array<{ hash: string; key: string }> = [];
-        source = source.replace(/\.t\.([A-Za-z0-9+/]{6})/g, (match, hash: string) => {
-            const key = getIntlKeyFromHash(hash);
-            if (key) { annotations.push({ hash, key }); return `.t[/*${key}*/]`; }
-            return match;
-        });
-        source = source.replace(/\.t\["([A-Za-z0-9+/]{6,8})"\]/g, (match, hash: string) => {
-            const key = getIntlKeyFromHash(hash);
-            if (key) { annotations.push({ hash, key }); return `.t[/*${key}*/]`; }
-            return match;
-        });
+        for (const regex of [createIntlHashDotRegex(), createIntlHashBracketRegex()]) {
+            source = source.replace(regex, (match, hash: string) => {
+                const key = getIntlKeyFromHash(hash);
+                if (key) { annotations.push({ hash, key }); return `.t[/*${key}*/]`; }
+                return match;
+            });
+        }
 
-        const maxLen = Math.min(maxLength, 50000);
+        const maxLen = Math.min(maxLength, CONTEXT.ANNOTATE_MAX_LENGTH);
         return {
             id,
             patched: args.patched !== false,
@@ -494,63 +709,155 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const source = getModuleSource(id);
         if (!source) return { error: true, message: `Module ${id} not found` };
 
-        const candidates: Array<{ find: string; type: string; unique: boolean; moduleCount: number; intlKey?: string }> = [];
+        const candidates: SuggestCandidate[] = [];
         const seen = new Set<string>();
 
-        const addCandidate = (find: string, searchStr: string, type: string, intlKey?: string) => {
-            if (seen.has(find) || find.length < 8) return;
+        const addCandidate = (find: string, searchStr: string, type: string, intlKey?: string, unstable?: boolean) => {
+            if (seen.has(find) || find.length < LIMITS.MODULE.SUGGEST_MIN_FIND_LEN) return;
             seen.add(find);
             const count = countModuleMatchesFast(searchStr, 3);
-            candidates.push({ find, type, unique: count === 1, moduleCount: count, intlKey });
+            candidates.push({ find, type, unique: count === 1, moduleCount: count, intlKey, unstable: unstable ? true : undefined });
         };
 
-        const intlHashPattern = /\.t\.([A-Za-z0-9+/]{6})/g;
-        const intlBracketPattern = /\.t\["([A-Za-z0-9+/]{6,8})"\]/g;
-        for (const regex of [intlHashPattern, intlBracketPattern]) {
+        const rawAnchors: AnchorCandidate[] = [];
+
+        for (const regex of [createIntlHashDotRegex(), createIntlHashBracketRegex()]) {
             let m;
             while ((m = regex.exec(source))) {
                 const hash = m[1];
                 const key = getIntlKeyFromHash(hash);
                 const findStr = key ? `#{intl::${key}}` : `#{intl::${hash}::raw}`;
-                addCandidate(findStr, `.${hash}`, "intl", key ?? undefined);
+                const searchStr = canonicalizeMatch(findStr);
+                addCandidate(findStr, searchStr, "intl", key ?? undefined);
+                rawAnchors.push({ find: findStr, search: searchStr, type: "intl", index: m.index, intlKey: key ?? undefined });
             }
         }
 
-        const stringPattern = /"([^"]{8,60})"/g;
-        let m;
-        while ((m = stringPattern.exec(source))) {
-            const str = m[1];
-            if (/^[a-z0-9_]+$/i.test(str) && !str.includes("\\")) addCandidate(str, str, "string");
+        {
+            const re = STORE_NAME_RE();
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(source))) {
+                const find = `="${m[1]}"`;
+                addCandidate(find, find, "storeName");
+                rawAnchors.push({ find, search: find, type: "storeName", index: m.index });
+            }
+        }
+        {
+            const re = STRING_LITERAL_RE();
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(source))) {
+                if (NOISE_STRINGS.has(m[1]) || !/^[a-zA-Z][a-zA-Z0-9_./ -]{4,}$/.test(m[1])) continue;
+                const type = m[1].includes(" ") ? "errorString" : "string";
+                addCandidate(m[1], m[1], type);
+                rawAnchors.push({ find: m[1], search: m[1], type, index: m.index });
+            }
         }
 
-        const propPattern = /([a-zA-Z_$][\w$]{3,30}):/g;
-        const propCounts = new Map<string, number>();
-        while ((m = propPattern.exec(source))) {
-            const prop = m[1];
-            propCounts.set(prop, (propCounts.get(prop) ?? 0) + 1);
+        const anchorScans: Array<{ regex: RegExp; extract: (m: RegExpExecArray) => { find: string; search: string; type: string } | null }> = [
+            { regex: /([a-zA-Z_$][\w$]{3,30}):/g, extract: m => ({ find: `${m[1]}:`, search: `${m[1]}:`, type: "prop" }) },
+            { regex: FUNC_CALL_RE(), extract: m => ({ find: `.${m[1]}(`, search: `.${m[1]}(`, type: "funcCall" }) },
+            { regex: ENUM_MEMBER_RE(), extract: m => ({ find: `.${m[1]}`, search: `.${m[1]}`, type: "enum" }) },
+            { regex: IDENT_ASSIGN_RE(), extract: m => NOISE_STRINGS.has(m[1]) || /^[a-z]{1,2}$/.test(m[1]) ? null : { find: m[1], search: m[1], type: "ident" } },
+        ];
+
+        for (const { regex, extract } of anchorScans) {
+            for (const anchor of scanSingleOccurrences(source, regex, extract)) {
+                addCandidate(anchor.find, anchor.search, anchor.type);
+                rawAnchors.push(anchor);
+            }
         }
-        for (const [prop] of [...propCounts].filter(([, c]) => c === 1).slice(0, 10)) {
-            addCandidate(`${prop}:`, `${prop}:`, "prop");
+
+        const ctxSuffixes = [";", ")", ",", "}", "\""];
+        const ctxPrefixes = ["=", "(", ",", "{", "\""];
+
+        for (const c of [...candidates]) {
+            if (c.unique || c.type === "intl" || c.type === "combined") continue;
+            const idx = source.indexOf(c.find);
+            if (idx < 0) continue;
+
+            const before = source[idx - 1];
+            const after = source[idx + c.find.length];
+
+            for (const suf of ctxSuffixes) {
+                if (after === suf) addCandidate(c.find + suf, c.find + suf, c.type + "+ctx");
+            }
+            for (const pre of ctxPrefixes) {
+                if (before === pre && !(pre === "=" && source[idx - 2] === "!")) {
+                    addCandidate(pre + c.find, pre + c.find, c.type + "+ctx");
+                }
+            }
+        }
+
+        const hasUnique = candidates.some(c => c.unique);
+        if (!hasUnique && rawAnchors.length >= 2) {
+            rawAnchors.sort((a, b) => a.index - b.index);
+            for (let i = 0; i < rawAnchors.length && candidates.filter(c => c.unique).length < 5; i++) {
+                for (let j = i + 1; j < rawAnchors.length; j++) {
+                    const a = rawAnchors[i], b = rawAnchors[j];
+                    const gap = b.index - (a.index + a.search.length);
+                    if (gap < 0 || gap > LIMITS.MODULE.SUGGEST_MAX_COMBINED_GAP) continue;
+                    const between = source.slice(a.index + a.search.length, b.index);
+                    if (/(?<=[=:(,])[\w$]{2,}(?=[,)}\].:;(])/.test(between)) continue;
+                    const combinedSearch = a.search + between + b.search;
+                    const combinedFind = a.find + between + b.find;
+                    if (combinedFind.length > LIMITS.MODULE.SUGGEST_MAX_COMBINED_LEN) continue;
+                    addCandidate(combinedFind, combinedSearch, "combined");
+                }
+            }
         }
 
         candidates.sort((a, b) => {
-            if (a.unique !== b.unique) return a.unique ? -1 : 1;
-            const typeOrder = { intl: 0, string: 1, prop: 2 };
-            return (typeOrder[a.type] ?? 3) - (typeOrder[b.type] ?? 3);
+            if (a.unstable !== b.unstable) return a.unstable ? 1 : -1;
+            return compareByAnchorType(a, b, ANCHOR_TYPE_ORDER);
         });
 
-        return { id, sourceSize: source.length, candidateCount: candidates.length, suggestions: candidates.slice(0, 15) };
+        const topN = LIMITS.MODULE.SUGGEST_TOP_N;
+        const result: SuggestCandidate[] = [];
+        const typeBuckets = new Map<string, SuggestCandidate[]>();
+        for (const c of candidates) {
+            const base = c.type.replace("+ctx", "");
+            const bucket = typeBuckets.get(base);
+            if (bucket) bucket.push(c);
+            else typeBuckets.set(base, [c]);
+        }
+        for (const [, bucket] of typeBuckets) {
+            const pick = bucket.filter(c => c.unique).slice(0, 3);
+            if (!pick.length) pick.push(...bucket.slice(0, 2));
+            result.push(...pick);
+        }
+        if (result.length < topN) {
+            for (const c of candidates) {
+                if (result.length >= topN) break;
+                if (!result.includes(c)) result.push(c);
+            }
+        }
+        result.sort((a, b) => compareByAnchorType(a, b, ANCHOR_TYPE_ORDER));
+
+        return { id, sourceSize: source.length, candidateCount: candidates.length, suggestions: result.slice(0, topN) };
     }
 
     if (pattern || action === "find") {
-        const results = searchModulesOptimized(source => {
-            if (!pattern) return false;
-            const regex = parseRegex(pattern);
-            return regex ? regex.test(source) : source.includes(pattern);
-        }, limit);
+        if (!pattern) return { error: true, message: "pattern required for find action" };
+        const parsed = parseRegex(pattern);
+        const regex = parsed ? canonicalizeMatch(parsed) : null;
+        const canonicalized = canonicalizeMatch(pattern);
+        const results = searchModulesOptimized(source =>
+            regex ? regex.test(source) : source.includes(canonicalized), limit);
 
-        return { count: results.length, ids: results, preview: results.map(moduleId => ({ id: moduleId, snippet: getModuleSource(moduleId).slice(0, 200) })) };
+        return {
+            count: results.length, ids: results, preview: results.map(moduleId => {
+                const source = getModuleSource(moduleId);
+                const match = regex ? source.match(regex) : null;
+                const idx = match?.index ?? source.indexOf(canonicalized);
+                if (idx >= 0) {
+                    const start = Math.max(0, idx - CONTEXT.SEARCH_SNIPPET);
+                    const end = Math.min(source.length, idx + (match?.[0].length ?? canonicalized.length) + CONTEXT.SEARCH_SNIPPET + 100);
+                    return { id: moduleId, snippet: source.slice(start, end) };
+                }
+                return { id: moduleId, snippet: source.slice(0, 200) };
+            })
+        };
     }
 
-    return { error: true, message: "Specify action or search criteria: props, code, displayName, className, exportName, exportValue, pattern, or id" };
+    return { error: true, message: "Specify action or search criteria" };
 }

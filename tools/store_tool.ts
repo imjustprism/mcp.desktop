@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { FluxDispatcher } from "@webpack/common";
-
-import { FluxDispatcherInternal, StoreToolArgs, ToolResult } from "../types";
+import { StoreToolArgs, ToolResult } from "../types";
+import { getFluxDispatcherInternal, resolveStore } from "../webpack";
+import { LIMITS } from "./constants";
 import { findStore, getAllStoreNames, serializeResult } from "./utils";
 
 export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> {
@@ -18,59 +18,52 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         const stores = getAllStoreNames();
         return {
             count: stores.length,
-            stores: stores.slice(0, 30),
-            note: stores.length > 30 ? "Use filter param or search by name" : undefined
+            stores: stores.slice(0, LIMITS.STORE.LIST_SLICE),
+            note: stores.length > LIMITS.STORE.LIST_SLICE ? "Use filter to narrow" : undefined
         };
     }
 
     if (!storeName) return { error: true, message: "name required for store operations" };
 
-    let resolvedName = storeName;
-    let store: Record<string, unknown> | null = null;
-
-    try {
-        store = findStore(storeName as Parameters<typeof findStore>[0]) as Record<string, unknown>;
-    } catch {
-        if (!storeName.endsWith("Store")) {
-            resolvedName = storeName + "Store";
-            try {
-                store = findStore(resolvedName as Parameters<typeof findStore>[0]) as Record<string, unknown>;
-            } catch { store = null; }
-        }
-    }
+    const resolved = resolveStore(storeName);
+    const resolvedName = resolved?.name ?? storeName;
+    const store = resolved?.store ?? null;
 
     if (!store) {
         const validStores = getAllStoreNames();
         const lower = storeName.toLowerCase();
         const starts = validStores.filter(s => s.toLowerCase().startsWith(lower));
         const contains = validStores.filter(s => s.toLowerCase().includes(lower) && !s.toLowerCase().startsWith(lower));
-        const suggestions = [...starts, ...contains].slice(0, 10);
+        const suggestions = [...starts, ...contains].slice(0, LIMITS.STORE.SUGGESTIONS);
 
-        if (!suggestions.length) {
-            const methodMatches: Array<{ store: string; method: string }> = [];
+        const looksLikeMethod = /^[a-z]/.test(storeName) || storeName.includes("(");
+        const methodMatches: Array<{ store: string; method: string }> = [];
+        if (!suggestions.length || looksLikeMethod) {
+            const methodLower = lower.replace(/[()]/g, "");
             for (const sn of validStores) {
-                if (methodMatches.length >= 10) break;
+                if (methodMatches.length >= LIMITS.STORE.METHOD_MATCHES) break;
                 try {
                     const s = findStore(sn as Parameters<typeof findStore>[0]) as Record<string, unknown>;
                     const proto = Object.getPrototypeOf(s);
                     const names = [...Object.getOwnPropertyNames(proto), ...Object.getOwnPropertyNames(s)];
                     for (const nm of names) {
-                        if (nm.toLowerCase().includes(lower)) {
+                        if (nm.toLowerCase().includes(methodLower)) {
                             methodMatches.push({ store: sn, method: nm });
                             break;
                         }
                     }
                 } catch { continue; }
             }
-            if (methodMatches.length) {
-                return { error: true, message: `Store "${storeName}" not found, but found matching methods`, methodMatches };
-            }
+        }
+
+        if (methodMatches.length) {
+            return { error: true, message: `Store "${storeName}" not found`, methodMatches, suggestions: !looksLikeMethod && suggestions.length ? suggestions : undefined };
         }
 
         return { error: true, message: `Store "${storeName}" not found`, suggestions: suggestions.length ? suggestions : undefined };
     }
 
-    const dispatcher = FluxDispatcher as unknown as FluxDispatcherInternal;
+    const dispatcher = getFluxDispatcherInternal();
 
     if (action === "subscriptions") {
         const dispatchToken = store._dispatchToken as string | undefined;
@@ -133,7 +126,7 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
     if ((action === "call" || action === "state") && method) {
         const desc = Object.getOwnPropertyDescriptor(store, method) ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(store), method);
 
-        const cap = (v: unknown) => typeof v === "object" && v !== null ? serializeResult(v, 3000) : v;
+        const cap = (v: unknown) => typeof v === "object" && v !== null ? serializeResult(v, LIMITS.STORE.SERIALIZE_CALL) : v;
         const typeOf = (v: unknown) => v === null ? "null" : v === undefined ? "undefined" : Array.isArray(v) ? "array" : typeof v;
 
         if (desc?.get) {
@@ -175,7 +168,7 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
 
     return {
         found: true,
-        displayName: (store.constructor as { displayName?: string })?.displayName,
+        displayName: resolvedName,
         methods: methods.sort(),
         getters: getters.sort(),
         properties: properties.sort()

@@ -9,13 +9,13 @@ import { MCPTool } from "../types";
 export const TOOLS: MCPTool[] = [
     {
         name: "module",
-        description: "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: get source. exports: list with types. context: code around pattern. diff: patched vs original. deps: dependencies. size: bytes. ids: list IDs. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track new modules. suggest: find string candidates for patching. annotate: source with intl hashes replaced by key names.",
+        description: "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: get source. exports: list with types. context: code around pattern. diff: patched vs original. deps: dependencies. size: bytes. ids: list IDs. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track new modules. suggest: find string candidates for patching. annotate: source with intl hashes replaced by key names. css: CSS module index/stats. components: discover UI components, props, variants.",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["find", "extract", "exports", "context", "diff", "deps", "size", "ids", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "annotate"],
+                    enum: ["find", "extract", "exports", "context", "diff", "deps", "size", "ids", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "annotate", "css", "components"],
                     description: "Action to perform"
                 },
                 id: {
@@ -38,7 +38,7 @@ export const TOOLS: MCPTool[] = [
                 },
                 className: {
                     type: "string",
-                    description: "Find CSS module by class name fragment"
+                    description: "Find CSS module by class name fragment, or reverse-lookup a rendered class (e.g. container_b2ca13)"
                 },
                 exportName: {
                     type: "string",
@@ -362,19 +362,24 @@ export const TOOLS: MCPTool[] = [
                     type: "boolean",
                     description: "Include props in fiber output",
                     default: false
+                },
+                breadth: {
+                    type: "number",
+                    description: "Max children per node for tree action",
+                    default: 10
                 }
             }
         }
     },
     {
         name: "discord",
-        description: "Discord context. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: list API routes. common: Webpack.Common modules. enum: find by member. memory: heap stats. performance: load times. gateway: websocket stats. waitForIpc: await IPC ready.",
+        description: "Discord context. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: list API routes. common: Webpack.Common modules. enum: find by member. memory: heap stats. performance: load times. gateway: websocket stats. waitForIpc: await IPC ready. constants: Discord constant categories. experiments: A/B test flags. platform: OS/build info + GLOBAL_ENV. tokens: design system colors/spacing/shadows. icons: URL builder functions.",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["context", "api", "snowflake", "endpoints", "common", "enum", "memory", "performance", "gateway", "waitForIpc"],
+                    enum: ["context", "api", "snowflake", "endpoints", "common", "enum", "memory", "performance", "gateway", "waitForIpc", "constants", "experiments", "platform", "tokens", "icons"],
                     description: "Action to perform"
                 },
                 method: {
@@ -553,7 +558,7 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "intercept",
-        description: "Intercept function calls. set: start capturing. get: retrieve args/returns. stop: restore. Captures args, returns, timestamps. Auto-expires.",
+        description: "Intercept function calls. set: start capturing. get: retrieve args/returns. stop: restore. Captures args, returns, timestamps. Auto-expires. exportKey supports dotted paths (e.g. 'A.sendMessage').",
         inputSchema: {
             type: "object",
             properties: {

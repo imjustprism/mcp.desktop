@@ -4,18 +4,14 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { FluxDispatcher } from "@webpack/common";
+import { FluxToolArgs } from "../types";
+import { FluxDispatcher, getFluxDispatcherInternal } from "../webpack";
+import { LIMITS } from "./constants";
 
-import { FluxDispatcherInternal } from "../types";
+export async function handleFluxTool(args: FluxToolArgs): Promise<unknown> {
+    const { action, event, type, payload, filter: filterPattern } = args;
 
-export async function handleFluxTool(args: Record<string, unknown>): Promise<unknown> {
-    const action = args.action as string | undefined;
-    const event = args.event as string | undefined;
-    const type = args.type as string | undefined;
-    const payload = args.payload as Record<string, unknown> | undefined;
-    const filterPattern = args.filter as string | undefined;
-
-    const dispatcher = FluxDispatcher as unknown as FluxDispatcherInternal;
+    const dispatcher = getFluxDispatcherInternal();
 
     if (action === "dispatch") {
         if (!type) return { error: true, message: "type required for dispatch" };
@@ -52,7 +48,7 @@ export async function handleFluxTool(args: Record<string, unknown>): Promise<unk
             return { error: true, message: `No handlers for event: ${event}` };
         }
 
-        return { found: true, event, storeHandlerCount: storeHandlers.length, storeHandlers: storeHandlers.slice(0, 30), subscriptionCount };
+        return { found: true, event, storeHandlerCount: storeHandlers.length, storeHandlers: storeHandlers.slice(0, LIMITS.FLUX.SLICE), subscriptionCount };
     }
 
     if (action === "types" || action === "events" || (!action && !event)) {
@@ -80,8 +76,8 @@ export async function handleFluxTool(args: Record<string, unknown>): Promise<unk
             events = events.filter(e => regex.test(e));
         }
 
-        return { total: eventSet.size, filtered: events.length, events: events.slice(0, 30), note: events.length > 30 ? "Use filter param to narrow results" : undefined };
+        return { total: eventSet.size, filtered: events.length, events: events.slice(0, LIMITS.FLUX.SLICE), note: events.length > LIMITS.FLUX.SLICE ? "Use filter to narrow" : undefined };
     }
 
-    return { error: true, message: "action: events, types, dispatch (with type), listeners (with event)" };
+    return { error: true, message: "action: events, types, dispatch, listeners" };
 }

@@ -5,7 +5,6 @@
  */
 
 import type { PluginOptionsItem } from "@utils/types";
-import type { FluxStore } from "@vencord/discord-types";
 
 export type JSONPrimitive = string | number | boolean | null;
 export type JSONObject = { [key: string]: JSONValue };
@@ -113,6 +112,8 @@ export interface InterceptCapture extends Timestamped {
 export interface FunctionIntercept extends Omit<ExpiringResource, "startedAt"> {
     moduleId: string;
     exportKey: string;
+    methodKey?: string;
+    methodParent?: Record<string, unknown>;
     original: (...args: unknown[]) => unknown;
     captures: InterceptCapture[];
 }
@@ -235,11 +236,6 @@ export interface GatewaySocket {
     resumeUrl: string | null;
 }
 
-export interface StoreWithListeners extends FluxStore {
-    addChangeListener: (handler: () => void) => void;
-    removeChangeListener: (handler: () => void) => void;
-}
-
 interface DisplayNameable {
     displayName?: string;
 }
@@ -347,11 +343,6 @@ export interface VencordPlugin {
     options?: Record<string, PluginOption>;
 }
 
-export interface PluginManagerAPI {
-    startPlugin: (plugin: unknown) => boolean;
-    stopPlugin: (plugin: unknown) => boolean;
-}
-
 export interface ToolError {
     error: true;
     message: string;
@@ -360,17 +351,13 @@ export interface ToolError {
 
 export type ToolResult<T = Record<string, unknown>> = T | ToolError;
 
-export function isToolError(result: ToolResult): result is ToolError {
-    return typeof result === "object" && result !== null && "error" in result && result.error === true;
-}
-
-type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "deps" | "size" | "ids" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate";
+type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "deps" | "size" | "ids" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate" | "css" | "components";
 type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods";
 type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test";
-type FluxAction_ = "events" | "types" | "dispatch" | "listeners";
+type FluxToolAction = "events" | "types" | "dispatch" | "listeners";
 type PatchAction = "unique" | "analyze" | "plugin" | "lint";
 type ReactAction = "query" | "styles" | "modify" | "tree" | "text" | "path" | "fiber" | "props" | "hooks" | "contexts" | "find" | "forceUpdate" | "state" | "owner" | "root";
-type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "memory" | "performance" | "gateway" | "waitForIpc";
+type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "memory" | "performance" | "gateway" | "waitForIpc" | "constants" | "experiments" | "platform" | "tokens" | "icons";
 type TraceAction = "events" | "handlers" | "storeEvents" | "start" | "get" | "stop" | "store";
 type InterceptAction = "set" | "get" | "stop";
 type PluginAction = "list" | "enable" | "disable" | "toggle" | "settings" | "setSetting";
@@ -425,7 +412,7 @@ export interface IntlToolArgs extends BaseToolArgs {
 }
 
 export interface FluxToolArgs {
-    action?: FluxAction_;
+    action?: FluxToolAction;
     event?: string;
     type?: string;
     payload?: Record<string, unknown>;
@@ -547,4 +534,156 @@ export interface FoundComponent {
     fiberDepth: number;
     matchedBy: "name" | "props";
     propKeys?: string[];
+}
+
+export interface CSSClassEntry {
+    moduleId: string;
+    key: string;
+    semantic: string;
+    hash: string;
+}
+
+export interface CSSModuleInfo {
+    classCount: number;
+    hash: string;
+    classes: Record<string, string>;
+}
+
+export interface CSSIndexCache {
+    index: Map<string, CSSClassEntry>;
+    modules: Map<string, CSSModuleInfo>;
+    builtAt: number;
+}
+
+export interface StoryControl {
+    type: string;
+    label?: string;
+    defaultValue?: unknown;
+    options?: unknown[];
+}
+
+export interface StoryEntry {
+    moduleId: string;
+    title: string;
+    name: string;
+    id: string;
+    docs?: string;
+    controls: Record<string, StoryControl>;
+}
+
+export interface ComponentIndex {
+    stories: StoryEntry[];
+    manaTypes: Map<string, string[]>;
+    displayNames: Map<string, Array<{ moduleId: string; key: string }>>;
+    uiBarrelId: string | null;
+    iconsModuleId: string | null;
+    uiBarrelStats: { components: number; icons: number; enums: number };
+    builtAt: number;
+}
+
+export interface FindModuleMatch {
+    id: string;
+    snippet: string;
+}
+
+export interface CompEntry {
+    key: string;
+    displayName?: string;
+    props?: Array<{ name: string; default?: string }>;
+    manaType?: string;
+}
+
+export interface SuggestCandidate {
+    find: string;
+    type: string;
+    unique: boolean;
+    moduleCount: number;
+    intlKey?: string;
+    unstable?: boolean;
+}
+
+export interface AnchorCandidate {
+    find: string;
+    search: string;
+    type: string;
+    index: number;
+    intlKey?: string;
+}
+
+export interface ModuleMatch {
+    id: string;
+    exports: unknown;
+    key: string;
+}
+
+export interface AnchorInfo {
+    anchor: string;
+    type: string;
+    unique: boolean;
+    distance: number;
+}
+
+export interface RegexWarning {
+    rule: string;
+    severity: "error" | "warning" | "info";
+    detail: string;
+    location?: string;
+}
+
+export interface MatchDiagnostic {
+    reason: string;
+    partialMatch?: string;
+    suggestion?: string;
+}
+
+export interface SnowflakeUtilsType {
+    extractTimestamp(snowflake: string): number;
+    fromTimestamp(timestamp: number): string;
+    compare(a: string, b: string): number;
+    age(snowflake: string): number;
+    atPreviousMillisecond(snowflake: string): string;
+    atNextMillisecond(snowflake: string): string;
+    isProbablyAValidSnowflake(value: string): boolean;
+}
+
+export interface PlatformUtils {
+    PlatformTypes: Record<string, string>;
+    isDesktop(): boolean;
+    isWeb(): boolean;
+    isAndroid(): boolean;
+    isIOS(): boolean;
+    isLinux(): boolean;
+    isMac(): boolean;
+    isWindows(): boolean;
+    getPlatform(): string;
+    getPlatformName(): string;
+    getOS(): string;
+    isPlatformEmbedded(): boolean;
+}
+
+export interface DesignTokenColor {
+    css: string;
+    resolve(ctx: { theme: string }): Record<string, unknown>;
+}
+
+export interface DesignTokens {
+    colors: Record<string, DesignTokenColor>;
+    unsafe_rawColors: Record<string, DesignTokenColor>;
+    shadows: Record<string, unknown>;
+    radii: Record<string, unknown>;
+    spacing: Record<string, unknown>;
+    modules: Record<string, unknown>;
+    themes: Record<string, unknown>;
+    layout?: Record<string, unknown>;
+    space?: Record<string, unknown>;
+}
+
+export interface PatternData {
+    starters: string[];
+    transitions: Map<string, string[]>;
+    parts: string[];
+    prefixes: string[];
+    prefixes2: string[];
+    suffixes: string[];
+    suffixes2: string[];
 }

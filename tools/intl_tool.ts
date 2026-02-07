@@ -6,6 +6,8 @@
 
 import { sleep } from "@utils/misc";
 
+import { IntlToolArgs, PatternData } from "../types";
+import { createIntlHashBracketRegex, createIntlHashDotRegex } from "./constants";
 import {
     buildIntlHashToKeyMap,
     extractIntlText,
@@ -18,81 +20,63 @@ import {
     searchModulesOptimized,
 } from "./utils";
 
-interface PatternData {
-    starters: string[];
-    transitions: Map<string, string[]>;
-    parts: string[];
-    prefixes: string[];
-    prefixes2: string[];
-    suffixes: string[];
-    suffixes2: string[];
+let patternCache: PatternData | null = null;
+
+function increment(map: Map<string, number>, key: string) {
+    map.set(key, (map.get(key) ?? 0) + 1);
 }
 
-let patternCache: PatternData | null = null;
+function sortByFrequency(counts: Map<string, number>, min = 2): string[] {
+    return [...counts.entries()]
+        .filter(([, count]) => count >= min)
+        .sort((a, b) => b[1] - a[1])
+        .map(([key]) => key);
+}
 
 function buildPatternData(): PatternData {
     if (patternCache) return patternCache;
 
-    const starterCounts = new Map<string, number>();
+    const starters = new Map<string, number>();
     const transitionCounts = new Map<string, Map<string, number>>();
-    const partCounts = new Map<string, number>();
-    const prefixCounts = new Map<string, number>();
-    const prefix2Counts = new Map<string, number>();
-    const suffixCounts = new Map<string, number>();
-    const suffix2Counts = new Map<string, number>();
+    const parts = new Map<string, number>();
+    const prefixes = new Map<string, number>();
+    const prefixes2 = new Map<string, number>();
+    const suffixes = new Map<string, number>();
+    const suffixes2 = new Map<string, number>();
 
     for (const key of Object.values(KEY_MAP)) {
-        const segments = key.split("_");
-        if (!segments.length) continue;
+        const segs = key.split("_");
+        if (!segs.length) continue;
 
-        const first = segments[0];
-        starterCounts.set(first, (starterCounts.get(first) ?? 0) + 1);
+        increment(starters, segs[0]);
+        for (const seg of segs) if (seg.length >= 2) increment(parts, seg);
 
-        for (let i = 0; i < segments.length - 1; i++) {
-            const from = segments[i];
-            const to = segments[i + 1];
-            if (!transitionCounts.has(from)) transitionCounts.set(from, new Map());
-            const toMap = transitionCounts.get(from)!;
-            toMap.set(to, (toMap.get(to) ?? 0) + 1);
+        for (let i = 0; i < segs.length - 1; i++) {
+            if (!transitionCounts.has(segs[i])) transitionCounts.set(segs[i], new Map());
+            increment(transitionCounts.get(segs[i])!, segs[i + 1]);
         }
 
-        for (const seg of segments) {
-            if (seg.length >= 2) partCounts.set(seg, (partCounts.get(seg) ?? 0) + 1);
+        if (segs.length >= 2) {
+            increment(prefixes, segs[0]);
+            increment(suffixes, segs[segs.length - 1]);
         }
-
-        if (segments.length >= 2) {
-            prefixCounts.set(first, (prefixCounts.get(first) ?? 0) + 1);
-            const last = segments[segments.length - 1];
-            suffixCounts.set(last, (suffixCounts.get(last) ?? 0) + 1);
-        }
-
-        if (segments.length >= 3) {
-            const p2 = segments.slice(0, 2).join("_");
-            prefix2Counts.set(p2, (prefix2Counts.get(p2) ?? 0) + 1);
-            const s2 = segments.slice(-2).join("_");
-            suffix2Counts.set(s2, (suffix2Counts.get(s2) ?? 0) + 1);
+        if (segs.length >= 3) {
+            increment(prefixes2, segs.slice(0, 2).join("_"));
+            increment(suffixes2, segs.slice(-2).join("_"));
         }
     }
-
-    const sortByFrequency = (counts: Map<string, number>, min = 2) =>
-        [...counts.entries()]
-            .filter(([, count]) => count >= min)
-            .sort((a, b) => b[1] - a[1])
-            .map(([key]) => key);
 
     const transitions = new Map<string, string[]>();
-    for (const [from, toMap] of transitionCounts) {
-        transitions.set(from, sortByFrequency(toMap, 1));
-    }
+    for (const [from, toMap] of transitionCounts) transitions.set(from, sortByFrequency(toMap, 1));
 
     patternCache = {
-        starters: sortByFrequency(starterCounts, 1),
+        starters: sortByFrequency(starters, 1),
         transitions,
-        parts: sortByFrequency(partCounts, 1),
-        prefixes: sortByFrequency(prefixCounts, 2),
-        prefixes2: sortByFrequency(prefix2Counts, 2),
-        suffixes: sortByFrequency(suffixCounts, 2),
-        suffixes2: sortByFrequency(suffix2Counts, 2),
+        parts: sortByFrequency(parts, 1),
+        prefixes: sortByFrequency(prefixes, 2),
+        prefixes2: sortByFrequency(prefixes2, 2),
+        suffixes: sortByFrequency(suffixes, 2),
+        suffixes2: sortByFrequency(suffixes2, 2),
     };
 
     return patternCache;
@@ -107,165 +91,84 @@ function extractWords(message: string): string[] {
         .slice(0, 6);
 }
 
+function* yieldTransitionChain(start: string, transitions: Map<string, string[]>, maxDepth: number, limits: number[]): Generator<string> {
+    const queue: string[][] = [[start]];
+    while (queue.length) {
+        const path = queue.shift()!;
+        if (path.length > 1) yield path.join("_");
+        if (path.length > maxDepth) continue;
+        const next = transitions.get(path[path.length - 1]);
+        if (!next) continue;
+        for (const n of next.slice(0, limits[path.length - 1] ?? 10)) {
+            queue.push([...path, n]);
+        }
+    }
+}
+
+function* yieldCombinations(lists: string[][]): Generator<string> {
+    if (!lists.length) return;
+    if (lists.length === 1) { for (const a of lists[0]) yield a; return; }
+    if (lists.length === 2) { for (const a of lists[0]) for (const b of lists[1]) yield `${a}_${b}`; return; }
+    for (const a of lists[0]) for (const b of lists[1]) for (const c of lists[2]) yield `${a}_${b}_${c}`;
+}
+
 function* generateCandidates(words: string[], patterns: PatternData): Generator<string> {
     if (!words.length) return;
 
     for (const word of words) yield word;
 
-    for (let i = 0; i < words.length; i++) {
-        for (let j = i + 1; j <= Math.min(words.length, i + 4); j++) {
+    for (let i = 0; i < words.length; i++)
+        for (let j = i + 1; j <= Math.min(words.length, i + 4); j++)
             yield words.slice(i, j).join("_");
-        }
-    }
 
     for (const starter of patterns.starters) {
         yield starter;
         for (const word of words) {
             yield `${starter}_${word}`;
-
-            const next = patterns.transitions.get(starter);
-            if (!next) continue;
-
-            for (const n1 of next.slice(0, 30)) {
-                yield `${starter}_${n1}`;
-                yield `${starter}_${n1}_${word}`;
-                yield `${starter}_${word}_${n1}`;
-
-                const next2 = patterns.transitions.get(n1);
-                if (!next2) continue;
-
-                for (const n2 of next2.slice(0, 20)) {
-                    yield `${starter}_${n1}_${n2}`;
-                    yield `${starter}_${n1}_${n2}_${word}`;
-                }
+            for (const chain of yieldTransitionChain(starter, patterns.transitions, 3, [30, 20, 10])) {
+                yield chain;
+                for (const w of words) { yield `${chain}_${w}`; yield `${w}_${chain}`; }
             }
         }
     }
 
     for (const word of words) {
-        const next = patterns.transitions.get(word);
-        if (next) {
-            for (const n1 of next.slice(0, 60)) {
-                yield `${word}_${n1}`;
-
-                const next2 = patterns.transitions.get(n1);
-                if (!next2) continue;
-
-                for (const n2 of next2.slice(0, 30)) {
-                    yield `${word}_${n1}_${n2}`;
-
-                    const next3 = patterns.transitions.get(n2);
-                    if (!next3) continue;
-
-                    for (const n3 of next3.slice(0, 15)) {
-                        yield `${word}_${n1}_${n2}_${n3}`;
-                    }
-                }
-            }
-        }
+        yield* yieldTransitionChain(word, patterns.transitions, 4, [60, 30, 15, 10]);
 
         for (const starter of patterns.starters) {
-            const chain = patterns.transitions.get(starter);
-            if (!chain?.includes(word)) continue;
-
+            if (!patterns.transitions.get(starter)?.includes(word)) continue;
             yield `${starter}_${word}`;
-
-            const after = patterns.transitions.get(word);
-            if (!after) continue;
-
-            for (const a1 of after.slice(0, 40)) {
-                yield `${starter}_${word}_${a1}`;
-
-                const after2 = patterns.transitions.get(a1);
-                if (!after2) continue;
-
-                for (const a2 of after2.slice(0, 20)) {
-                    yield `${starter}_${word}_${a1}_${a2}`;
-                }
+            for (const chain of yieldTransitionChain(word, patterns.transitions, 2, [40, 20])) {
+                yield `${starter}_${chain}`;
             }
         }
     }
 
-    for (const pre of patterns.prefixes.slice(0, 400)) {
-        for (const word of words) yield `${pre}_${word}`;
-    }
+    const cores = words.flatMap((_, i) =>
+        Array.from({ length: Math.min(words.length, i + 3) - i }, (__, j) => words.slice(i, i + j + 1).join("_"))
+    );
 
-    for (const pre of patterns.prefixes2.slice(0, 300)) {
-        for (const word of words) yield `${pre}_${word}`;
-    }
+    const prefixSuffixPairs: Array<[string[], string[], number]> = [
+        [patterns.prefixes.slice(0, 400), words, 0],
+        [patterns.prefixes2.slice(0, 300), words, 0],
+        [words, patterns.suffixes.slice(0, 300), 0],
+        [words, patterns.suffixes2.slice(0, 250), 0],
+        [patterns.prefixes.slice(0, 300), cores, 0],
+        [patterns.prefixes2.slice(0, 250), cores, 0],
+        [cores, patterns.suffixes.slice(0, 250), 0],
+        [cores, patterns.suffixes2.slice(0, 150), 0],
+    ];
 
-    for (const word of words) {
-        for (const suf of patterns.suffixes.slice(0, 300)) yield `${word}_${suf}`;
-        for (const suf of patterns.suffixes2.slice(0, 250)) yield `${word}_${suf}`;
-    }
+    for (const [a, b] of prefixSuffixPairs) yield* yieldCombinations([a, b]);
 
-    for (let i = 0; i < words.length; i++) {
-        for (let j = i + 1; j <= Math.min(words.length, i + 3); j++) {
-            const core = words.slice(i, j).join("_");
-            for (const pre of patterns.prefixes.slice(0, 300)) yield `${pre}_${core}`;
-            for (const pre of patterns.prefixes2.slice(0, 250)) yield `${pre}_${core}`;
-            for (const suf of patterns.suffixes.slice(0, 250)) yield `${core}_${suf}`;
-            for (const suf of patterns.suffixes2.slice(0, 150)) yield `${core}_${suf}`;
-        }
-    }
+    const tripleSpecs: Array<[string[], string[], string[]]> = [
+        [patterns.prefixes.slice(0, 200), words, patterns.suffixes.slice(0, 150)],
+        [patterns.prefixes2.slice(0, 150), words, patterns.suffixes.slice(0, 120)],
+        [patterns.prefixes.slice(0, 150), words, patterns.suffixes2.slice(0, 120)],
+        [patterns.prefixes.slice(0, 120), cores, patterns.suffixes.slice(0, 100)],
+    ];
 
-    for (const pre of patterns.prefixes.slice(0, 200)) {
-        for (const word of words) {
-            for (const suf of patterns.suffixes.slice(0, 150)) {
-                yield `${pre}_${word}_${suf}`;
-            }
-        }
-    }
-
-    for (const pre of patterns.prefixes2.slice(0, 150)) {
-        for (const word of words) {
-            for (const suf of patterns.suffixes.slice(0, 120)) {
-                yield `${pre}_${word}_${suf}`;
-            }
-        }
-    }
-
-    for (const pre of patterns.prefixes.slice(0, 150)) {
-        for (const word of words) {
-            for (const suf of patterns.suffixes2.slice(0, 120)) {
-                yield `${pre}_${word}_${suf}`;
-            }
-        }
-    }
-
-    for (let i = 0; i < words.length; i++) {
-        for (let j = i + 1; j <= Math.min(words.length, i + 2); j++) {
-            const core = words.slice(i, j).join("_");
-            for (const pre of patterns.prefixes.slice(0, 120)) {
-                for (const suf of patterns.suffixes.slice(0, 100)) {
-                    yield `${pre}_${core}_${suf}`;
-                }
-            }
-        }
-    }
-
-    for (const word of words) {
-        const stack: string[][] = [[word]];
-        const seen = new Set<string>();
-
-        while (stack.length) {
-            const path = stack.pop()!;
-            if (path.length > 5) continue;
-
-            const current = path[path.length - 1];
-            const next = patterns.transitions.get(current);
-            if (!next) continue;
-
-            for (const n of next.slice(0, 10)) {
-                const newPath = [...path, n];
-                const candidate = newPath.join("_");
-                if (seen.has(candidate)) continue;
-                seen.add(candidate);
-                yield candidate;
-                stack.push(newPath);
-            }
-        }
-    }
+    for (const [a, b, c] of tripleSpecs) yield* yieldCombinations([a, b, c]);
 
     for (const part of patterns.parts.slice(0, 120)) {
         for (const word of words) {
@@ -282,26 +185,16 @@ function getMessage(hash: string): string | null {
     return getIntlMessageFromHash(hash);
 }
 
-export async function handleIntlTool(args: Record<string, unknown>): Promise<unknown> {
-    const action = args.action as string | undefined;
-    const key = args.key as string | undefined;
-    const hash = args.hash as string | undefined;
-    const hashes = args.hashes as string[] | undefined;
-    const query = args.query as string | undefined;
-    const moduleId = args.moduleId as string | undefined;
-    const limit = (args.limit as number) ?? 20;
-
-    const candidates = args.candidates as string[] | undefined;
-    const prefixes = args.prefixes as string[] | undefined;
-    const suffixes = args.suffixes as string[] | undefined;
-    const mids = args.mids as string[] | undefined;
-    const pattern = args.pattern as string | undefined;
-    const parts = args.parts as Record<string, string[]> | undefined;
+export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
+    const { action, key, hash, hashes, query, moduleId, candidates, prefixes, suffixes, mids, pattern, parts } = args;
+    const limit = args.limit ?? 20;
 
     if (action === "hash" || (key && !action)) {
         if (!key) return { error: true, message: "key required" };
         const h = runtimeHashMessageKey(key);
-        return { key, hash: h, find: `#{intl::${key}}`, message: getMessage(h) };
+        const msg = getMessage(h);
+        const exists = !!msg;
+        return { key, hash: h, find: `#{intl::${key}}`, message: msg, exists, warning: exists ? undefined : "Key not in Discord intl definitions, hash may be invalid" };
     }
 
     if (action === "reverse" || (hash && !action && !key)) {
@@ -333,12 +226,15 @@ export async function handleIntlTool(args: Record<string, unknown>): Promise<unk
 
             if (!isMatch) continue;
 
-            const entry: { hash: string; message: string; key?: string } = {
+            const entry: { hash: string; message: string; key?: string; find?: string } = {
                 hash: h,
                 message: text.slice(0, 200)
             };
             const known = hashMap.get(h);
-            if (known) entry.key = known;
+            if (known) {
+                entry.key = known;
+                entry.find = `#{intl::${known}}`;
+            }
 
             if (lower === queryLower) exact.push(entry);
             else partial.push(entry);
@@ -353,8 +249,8 @@ export async function handleIntlTool(args: Record<string, unknown>): Promise<unk
         if (!source) return { error: true, message: `module ${moduleId} not found` };
 
         const hashPatterns = [
-            /\.t\.([A-Za-z0-9+/]{6})/g,
-            /\.t\["([A-Za-z0-9+/]{6})"\]/g,
+            createIntlHashDotRegex(),
+            createIntlHashBracketRegex(),
             /intl\.string\(\w+\.t\.([A-Za-z0-9+/]{6})\)/g,
             /"([A-Za-z0-9+/]{6})":\s*\[/g
         ];
@@ -367,18 +263,23 @@ export async function handleIntlTool(args: Record<string, unknown>): Promise<unk
             }
         }
 
-        const results = [...found].map(h => ({ hash: h, message: getMessage(h) }));
+        const results = [...found].map(h => {
+            const k = getIntlKeyFromHash(h);
+            return { hash: h, key: k, find: k ? `#{intl::${k}}` : `#{intl::${h}::raw}`, message: getMessage(h) };
+        });
         return { moduleId, count: found.size, hashes: results };
     }
 
     if (action === "targets") {
         if (!key) return { error: true, message: "key required" };
         const h = runtimeHashMessageKey(key);
+        const dotUsage = `.t.${h}`;
+        const bracketUsage = `.t["${h}"]`;
         return {
             key,
             hash: h,
             message: getMessage(h),
-            modules: searchModulesOptimized(src => src.includes(h), limit)
+            modules: searchModulesOptimized(src => src.includes(dotUsage) || src.includes(bracketUsage), limit)
         };
     }
 
@@ -500,5 +401,5 @@ export async function handleIntlTool(args: Record<string, unknown>): Promise<unk
         return { tested, found, notFound };
     }
 
-    return { error: true, message: "action: hash, reverse, search, scan, targets, bruteforce, or test" };
+    return { error: true, message: "action: hash, reverse, search, scan, targets, bruteforce, test" };
 }

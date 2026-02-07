@@ -14,6 +14,8 @@ import {
     cleanupAllIntercepts,
     cleanupAllModuleWatches,
     cleanupAllTraces,
+    clearComponentIndexCache,
+    clearCSSIndexCache,
     getAdaptiveTimeout,
     handleDiscordTool,
     handleFluxTool,
@@ -27,7 +29,6 @@ import {
     handleStoreTool,
     handleTestPatchTool,
     handleTraceTool,
-    recordMetric,
     serializeResult,
     TOOLS,
     withTimeout,
@@ -38,6 +39,7 @@ const Native = VencordNative.pluginHelpers.mcp as PluginNative<typeof import("./
 const logger = new Logger("mcp", "#d97756");
 
 const toolCache = new Map<string, CacheEntry>();
+const TOOL_NAMES = new Set(TOOLS.map(t => t.name));
 const TOOL_CACHE_TTLS: Readonly<Record<string, number>> = {
     store: 120000,
     module: 30000,
@@ -50,19 +52,7 @@ const DEFAULT_CACHE_TTL = 10000;
 const MAX_CACHE_ENTRIES = 300;
 
 function getCacheKey(tool: string, args: Record<string, unknown>): string {
-    const action = args.action as string | undefined;
-    const id = args.id as string | undefined;
-    const name = args.name as string | undefined;
-    const method = args.method as string | undefined;
-    const pattern = args.pattern as string | undefined;
-
-    const primary = id ?? name ?? "";
-    const secondary = method ?? pattern ?? "";
-
-    if (primary || secondary) {
-        return `${tool}:${action ?? ""}:${primary}:${secondary}`;
-    }
-    return `${tool}:${action ?? ""}:${JSON.stringify(args)}`;
+    return `${tool}:${JSON.stringify(args)}`;
 }
 
 const NON_CACHEABLE_TOOLS = new Set(["reloadDiscord", "evaluateCode"]);
@@ -117,81 +107,40 @@ const settings = definePluginSettings({
     }
 });
 
+type ToolHandler = (args: any) => Promise<unknown> | unknown;
+
+const TOOL_HANDLERS: Record<string, ToolHandler> = {
+    module: handleModuleTool,
+    store: handleStoreTool,
+    intl: handleIntlTool,
+    flux: handleFluxTool,
+    patch: handlePatchTool,
+    react: handleReactTool,
+    discord: handleDiscordTool,
+    plugin: handlePluginTool,
+    search: handleSearchTool,
+    testPatch: handleTestPatchTool,
+    trace: handleTraceTool,
+    intercept: handleInterceptTool,
+    evaluateCode: (args: { code?: string }) => (0, eval)(args.code as string),
+    reloadDiscord: () => {
+        Native.notifyReloadTriggered();
+        setTimeout(() => location.reload(), 100);
+        return { reloading: true, message: "Discord is reloading. The next request will automatically wait for Discord to be ready." };
+    },
+};
+
 async function executeToolCall(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
     const cached = getCachedResult(name, args);
     if (cached !== null) {
         return { content: [{ type: "text", text: serializeResult({ ...cached as object, cached: true }) }] };
     }
 
+    const handler = TOOL_HANDLERS[name];
+    if (!handler) return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+
     try {
-        let result: unknown;
-
-        switch (name) {
-            case "module":
-                result = await handleModuleTool(args);
-                break;
-
-            case "store":
-                result = await handleStoreTool(args);
-                break;
-
-            case "intl":
-                result = await handleIntlTool(args);
-                break;
-
-            case "flux":
-                result = await handleFluxTool(args);
-                break;
-
-            case "patch":
-                result = await handlePatchTool(args);
-                break;
-
-            case "react":
-                result = await handleReactTool(args);
-                break;
-
-            case "discord":
-                result = await handleDiscordTool(args);
-                break;
-
-            case "plugin":
-                result = await handlePluginTool(args);
-                break;
-
-            case "search":
-                result = await handleSearchTool(args);
-                break;
-
-            case "testPatch":
-                result = await handleTestPatchTool(args);
-                break;
-
-            case "trace":
-                result = await handleTraceTool(args);
-                break;
-
-            case "intercept":
-                result = await handleInterceptTool(args);
-                break;
-
-            case "evaluateCode": {
-                const code = args.code as string;
-                result = (0, eval)(code);
-                break;
-            }
-
-            case "reloadDiscord": {
-                Native.notifyReloadTriggered();
-                result = { reloading: true, message: "Discord is reloading. The next request will automatically wait for Discord to be ready." };
-                setTimeout(() => location.reload(), 100);
-                break;
-            }
-
-            default:
-                return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-        }
-
+        const result = await handler(args);
         setCachedResult(name, args, result);
         return { content: [{ type: "text", text: serializeResult(result) }] };
     } catch (error) {
@@ -266,7 +215,7 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
                 return { jsonrpc: "2.0", id, error: { code: -32602, message: "Missing tool name" } };
             }
 
-            if (!TOOLS.some(t => t.name === params.name)) {
+            if (!TOOL_NAMES.has(params.name)) {
                 sessionStats.errors++;
                 logger.error(`Unknown tool: ${params.name}`);
                 return { jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool: ${params.name}` } };
@@ -288,11 +237,9 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
             }
 
             const elapsed = performance.now() - start;
-            recordMetric(params.name, elapsed);
-
-            if (toolResult.isError) sessionStats.errors++;
 
             if (toolResult.isError) {
+                sessionStats.errors++;
                 logger.error(`${params.name} ${elapsed.toFixed(2)}ms`);
             } else if (elapsed > 5000) {
                 logger.warn(`${params.name} ${elapsed.toFixed(2)}ms`);
@@ -370,6 +317,7 @@ export default definePlugin({
     idleCount: 0,
 
     scheduleImmediate(this: PluginInstance) {
+        if (!this.polling) return;
         if (!this.channel) {
             this.channel = new MessageChannel();
             this.channel.port1.onmessage = () => this.poll();
@@ -428,6 +376,8 @@ export default definePlugin({
         cleanupAllTraces();
         cleanupAllIntercepts();
         cleanupAllModuleWatches();
+        clearComponentIndexCache();
+        clearCSSIndexCache();
         toolCache.clear();
         Native.stopServer();
     }

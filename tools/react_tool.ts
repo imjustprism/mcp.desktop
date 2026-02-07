@@ -5,9 +5,8 @@
  */
 
 import { FiberMemoizedState, FiberNode, FoundComponent, HookInfo, ReactFiber, ReactToolArgs, ToolResult, TreeNode } from "../types";
+import { CSS_CLASS_CAPTURE_RE, INTERESTING_PROP_KEYWORDS, LIMITS } from "./constants";
 import { getComponentInfo, getComponentName, getFiber, getHookType, serializeValue } from "./utils";
-
-const LIMITS = { maxDepth: 50, maxLimit: 100, maxBreadth: 50, maxProcess: 15000, maxNamedComponents: 100 } as const;
 
 function getReactRoot(): ReactFiber | null {
     const container = document.getElementById("app-mount");
@@ -25,12 +24,23 @@ function findElement(selector: string): Element | { error: true; message: string
     }
 }
 
+function walkFiberUp(fiber: ReactFiber | null, maxDepth: number, predicate: (f: ReactFiber) => boolean): ReactFiber | null {
+    let current = fiber;
+    let depth = 0;
+    while (current && depth < maxDepth) {
+        if (predicate(current)) return current;
+        current = current.return ?? null;
+        depth++;
+    }
+    return null;
+}
+
 export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> {
     const { action, selector, componentName } = args;
-    const maxDepth = Math.min(Math.max(args.depth ?? 10, 1), LIMITS.maxDepth);
+    const maxDepth = Math.min(Math.max(args.depth ?? 10, 1), LIMITS.REACT.MAX_DEPTH);
     const direction = args.direction ?? "up";
     const includeProps = args.includeProps ?? false;
-    const limit = Math.min(Math.max(args.limit ?? 20, 1), LIMITS.maxLimit);
+    const limit = Math.min(Math.max(args.limit ?? 20, 1), LIMITS.REACT.MAX_LIMIT);
 
     if (!action) return { error: true, message: "action required" };
 
@@ -63,7 +73,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             if (!selectorStr) {
                 current = f.return ?? null;
                 let upDepth = 0;
-                while (current && !selectorStr && upDepth < 10) {
+                while (current && !selectorStr && upDepth < LIMITS.REACT.PARENT_SEARCH_DEPTH) {
                     if (current.stateNode instanceof Element) {
                         const el = current.stateNode;
                         const tag = el.tagName.toLowerCase();
@@ -80,7 +90,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         const queue: Array<{ fiber: ReactFiber; depth: number }> = [{ fiber: rootFiber, depth: 0 }];
         let processed = 0;
 
-        while (queue.length && processed < LIMITS.maxProcess && found.length < limit) {
+        while (queue.length && processed < LIMITS.REACT.MAX_PROCESS && found.length < limit) {
             const { fiber: f, depth } = queue.shift()!;
             processed++;
 
@@ -96,7 +106,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
                 }
             } else if (includeByProps && isComponentFiber && f.memoizedProps) {
                 const props = f.memoizedProps as Record<string, unknown>;
-                const propKeys = Object.keys(props).filter(k => k !== "children" && k.length > 2);
+                const propKeys = Object.keys(props).filter(k => k !== "children" && k.length > LIMITS.REACT.PROP_FILTER_MIN_LENGTH);
                 const matchingProps = propKeys.filter(k => k.toLowerCase().includes(lowerName));
 
                 if (matchingProps.length) {
@@ -104,7 +114,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
                     const key = `props:${matchingProps.sort().join(",")}:${selectorStr}`;
                     if (!seenSelectors.has(key)) {
                         seenSelectors.add(key);
-                        found.push({ name: info.name, selector: selectorStr, tagType: info.tagType, fiberDepth: depth, matchedBy: "props", propKeys: matchingProps.slice(0, 8) });
+                        found.push({ name: info.name, selector: selectorStr, tagType: info.tagType, fiberDepth: depth, matchedBy: "props", propKeys: matchingProps.slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW) });
                     }
                 }
             }
@@ -120,7 +130,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             found: found.length,
             components: found,
             fibersSearched: processed,
-            note: !found.length ? `No components matching "${componentName}" found` : found.length >= limit ? `Results limited to ${limit}` : undefined
+            note: !found.length ? `No matches for "${componentName}"` : found.length >= limit ? `Limited to ${limit}` : undefined
         };
     }
 
@@ -134,23 +144,22 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         const queue: ReactFiber[] = [rootFiber];
         let processed = 0;
 
-        while (queue.length && processed < LIMITS.maxProcess) {
+        while (queue.length && processed < LIMITS.REACT.MAX_PROCESS) {
             const f = queue.shift()!;
             processed++;
 
             const info = getComponentInfo(f);
             tagCounts[info.tagType] = (tagCounts[info.tagType] ?? 0) + 1;
 
-            if (info.name && namedComponents.length < LIMITS.maxNamedComponents && !namedComponents.includes(info.name)) {
+            if (info.name && namedComponents.length < LIMITS.REACT.MAX_NAMED_COMPONENTS && !namedComponents.includes(info.name)) {
                 namedComponents.push(info.name);
             }
 
-            if ((f.tag === 0 || f.tag === 1) && f.memoizedProps && interestingPropPatterns.size < 50) {
+            if ((f.tag === 0 || f.tag === 1) && f.memoizedProps && interestingPropPatterns.size < LIMITS.REACT.MAX_STYLES) {
                 const props = f.memoizedProps as Record<string, unknown>;
-                for (const key of Object.keys(props).filter(k => k !== "children" && k.length > 2)) {
+                for (const key of Object.keys(props).filter(k => k !== "children" && k.length > LIMITS.REACT.PROP_FILTER_MIN_LENGTH)) {
                     const lower = key.toLowerCase();
-                    if (lower.includes("message") || lower.includes("channel") || lower.includes("guild") ||
-                        lower.includes("user") || lower.includes("member") || lower.includes("role")) {
+                    if ([...INTERESTING_PROP_KEYWORDS].some(kw => lower.includes(kw))) {
                         interestingPropPatterns.add(key);
                     }
                 }
@@ -168,7 +177,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             tagCounts,
             namedComponents: namedComponents.sort(),
             searchableProps: [...interestingPropPatterns].sort(),
-            note: processed >= LIMITS.maxProcess ? `Traversal stopped at ${LIMITS.maxProcess} nodes` : undefined
+            note: processed >= LIMITS.REACT.MAX_PROCESS ? `Stopped at ${LIMITS.REACT.MAX_PROCESS} nodes` : undefined
         };
     }
 
@@ -179,7 +188,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     const el = elResult;
 
     if (action === "query") {
-        const includeText = args.includeText as boolean ?? false;
+        const includeText = args.includeText ?? false;
 
         let elements: NodeListOf<Element>;
         try {
@@ -188,7 +197,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             return { error: true, message: `Invalid selector "${selector}": ${e instanceof Error ? e.message : "syntax error"}` };
         }
 
-        const results: Array<{ index: number; tagName: string; id: string | null; className: string | null; attributes: Record<string, string>; text?: string; rect: { top: number; left: number; width: number; height: number } }> = [];
+        const results: Array<{ index: number; tagName: string; id: string | null; className: string | null; cssHint?: string; attributes: Record<string, string>; text?: string; rect: { top: number; left: number; width: number; height: number } }> = [];
 
         for (let i = 0; i < Math.min(elements.length, limit); i++) {
             const elem = elements[i];
@@ -197,38 +206,42 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
 
             for (const attr of elem.attributes) {
                 if (!attr.name.startsWith("__react") && attrs[attr.name] === undefined) {
-                    attrs[attr.name] = attr.value.slice(0, 100);
+                    attrs[attr.name] = attr.value.slice(0, LIMITS.REACT.ATTR_VALUE_SLICE);
                 }
             }
 
+            const classStr = elem.className?.toString() ?? "";
             const entry: typeof results[0] = {
                 index: i,
                 tagName: elem.tagName,
                 id: elem.id || null,
-                className: elem.className?.toString().slice(0, 200) || null,
+                className: classStr.slice(0, LIMITS.REACT.CLASS_NAME_SLICE) || null,
                 attributes: attrs,
                 rect: { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width), height: Math.round(rect.height) }
             };
 
-            if (includeText) entry.text = elem.textContent?.slice(0, 100) || "";
+            const cssMatch = CSS_CLASS_CAPTURE_RE.exec(classStr);
+            if (cssMatch) entry.cssHint = `module className="${cssMatch[1]}" for CSS module lookup`;
+
+            if (includeText) entry.text = elem.textContent?.slice(0, LIMITS.REACT.ATTR_VALUE_SLICE) || "";
             results.push(entry);
         }
 
-        return { selector, total: elements.length, returned: results.length, elements: results, note: elements.length > limit ? `Showing ${limit} of ${elements.length} elements` : undefined };
+        return { selector, total: elements.length, returned: results.length, elements: results, note: elements.length > limit ? `${limit} of ${elements.length} shown` : undefined };
     }
 
     if (action === "styles") {
-        const properties = args.properties as string[] | undefined;
+        const { properties } = args;
         const computed = window.getComputedStyle(el);
         const styles: Record<string, string> = {};
 
         if (properties?.length) {
-            for (const prop of properties.slice(0, 50)) {
+            for (const prop of properties.slice(0, LIMITS.REACT.MAX_STYLES)) {
                 styles[prop] = computed.getPropertyValue(prop) || "(not set)";
             }
         } else {
             const defaultStyles = window.getComputedStyle(document.createElement(el.tagName));
-            for (let i = 0; i < computed.length && Object.keys(styles).length < 50; i++) {
+            for (let i = 0; i < computed.length && Object.keys(styles).length < LIMITS.REACT.MAX_STYLES; i++) {
                 const prop = computed[i];
                 if (prop.startsWith("-webkit-") || prop.startsWith("-moz-")) continue;
                 const value = computed.getPropertyValue(prop);
@@ -240,20 +253,17 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     }
 
     if (action === "modify") {
-        const styles = args.styles as Record<string, string> | undefined;
-        const addClass = args.addClass as string | undefined;
-        const removeClass = args.removeClass as string | undefined;
-        const setAttribute = args.setAttribute as Record<string, string> | undefined;
+        const { styles, addClass, removeClass, setAttribute } = args;
 
         if (!styles && !addClass && !removeClass && !setAttribute) {
-            return { error: true, message: "At least one modification required: styles, addClass, removeClass, or setAttribute" };
+            return { error: true, message: "Provide styles, addClass, removeClass, or setAttribute" };
         }
 
         const htmlEl = el as HTMLElement;
         const changes: string[] = [];
 
         if (styles) {
-            for (const [prop, value] of Object.entries(styles).slice(0, 20)) {
+            for (const [prop, value] of Object.entries(styles).slice(0, LIMITS.REACT.STYLE_MODIFY_MAX)) {
                 htmlEl.style.setProperty(prop, value);
                 changes.push(`style.${prop} = ${value}`);
             }
@@ -270,23 +280,23 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         }
 
         if (setAttribute) {
-            for (const [attr, value] of Object.entries(setAttribute).slice(0, 10)) {
+            for (const [attr, value] of Object.entries(setAttribute).slice(0, LIMITS.REACT.SET_ATTRIBUTE_MAX)) {
                 htmlEl.setAttribute(attr, value);
                 changes.push(`${attr} = ${value}`);
             }
         }
 
-        return { found: true, selector, changes, note: "Changes are temporary and will be lost on re-render" };
+        return { found: true, selector, changes, note: "Temporary, lost on re-render" };
     }
 
     if (action === "tree") {
-        const breadth = Math.min(Math.max(args.breadth as number ?? 10, 1), LIMITS.maxBreadth);
+        const breadth = Math.min(Math.max(args.breadth ?? 10, 1), LIMITS.REACT.MAX_BREADTH);
 
         const buildNode = (node: Element, d: number): TreeNode => {
             const info: TreeNode = { tag: node.tagName.toLowerCase() };
             if (node.id) info.id = node.id;
-            if (node.classList.length) info.classes = [...node.classList].slice(0, 5);
-            if (!node.children.length && node.textContent) info.text = node.textContent.slice(0, 50);
+            if (node.classList.length) info.classes = [...node.classList].slice(0, LIMITS.REACT.MAX_CLASS_LIST);
+            if (!node.children.length && node.textContent) info.text = node.textContent.slice(0, LIMITS.REACT.TREE_TEXT_SLICE);
 
             if (d > 0 && node.children.length) {
                 const childCount = node.children.length;
@@ -304,22 +314,22 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     }
 
     if (action === "text") {
-        const textContent = el.textContent?.trim().slice(0, 5000) ?? "";
+        const textContent = el.textContent?.trim().slice(0, LIMITS.REACT.TEXT_CONTENT_MAX) ?? "";
         const childTexts: Array<{ tag: string; text: string }> = [];
 
         for (let i = 0; i < Math.min(el.children.length, limit); i++) {
             const text = el.children[i].textContent?.trim();
-            if (text) childTexts.push({ tag: el.children[i].tagName.toLowerCase(), text: text.slice(0, 200) });
+            if (text) childTexts.push({ tag: el.children[i].tagName.toLowerCase(), text: text.slice(0, LIMITS.REACT.CHILD_TEXT_SLICE) });
         }
 
-        return { found: true, selector, textLength: textContent.length, text: textContent.slice(0, 1000), childTexts: childTexts.slice(0, 20) };
+        return { found: true, selector, textLength: textContent.length, text: textContent.slice(0, LIMITS.REACT.TEXT_PREVIEW), childTexts: childTexts.slice(0, LIMITS.REACT.CHILD_TEXTS_MAX) };
     }
 
     if (action === "path") {
         const parts: string[] = [];
         let current: Element | null = el;
 
-        while (current && current !== document.body && parts.length < 15) {
+        while (current && current !== document.body && parts.length < LIMITS.REACT.MAX_PATH_DEPTH) {
             const tag = current.tagName.toLowerCase();
             let part = tag;
 
@@ -349,8 +359,8 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     const fiber = getFiber(el);
 
     if (action === "fiber") {
-        if (!fiber) return { found: true, selector, hasFiber: false, message: "No React fiber found on this element" };
-        if (direction !== "up" && direction !== "down") return { error: true, message: `Invalid direction "${direction}". Use "up" or "down"` };
+        if (!fiber) return { found: true, selector, hasFiber: false, message: "No fiber found" };
+        if (direction !== "up" && direction !== "down") return { error: true, message: `Invalid direction "${direction}"` };
 
         const nodes: FiberNode[] = [];
 
@@ -363,7 +373,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
                 if (info.name) node.name = info.name;
                 else if (info.isMinified) node.minified = true;
                 if (includeProps && current.memoizedProps) {
-                    node.propKeys = Object.keys(current.memoizedProps).filter(k => k.length > 1).slice(0, 10);
+                    node.propKeys = Object.keys(current.memoizedProps).filter(k => k.length > 1).slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW);
                 }
                 if (current.memoizedState) node.hasState = true;
                 nodes.push(node);
@@ -378,7 +388,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
                 if (info.name) node.name = info.name;
                 else if (info.isMinified) node.minified = true;
                 if (includeProps && f.memoizedProps) {
-                    node.propKeys = Object.keys(f.memoizedProps).filter(k => k.length > 1).slice(0, 10);
+                    node.propKeys = Object.keys(f.memoizedProps).filter(k => k.length > 1).slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW);
                 }
                 if (f.memoizedState) node.hasState = true;
                 nodes.push(node);
@@ -392,25 +402,13 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     }
 
     if (action === "props") {
-        if (!fiber) return { found: true, selector, hasFiber: false, props: null, message: "No React fiber found" };
+        if (!fiber) return { found: true, selector, hasFiber: false, props: null, message: "No fiber found" };
 
-        let current: ReactFiber | null = fiber;
-        let depth = 0;
-        let targetFiber: ReactFiber | null = null;
-
-        while (current && depth < maxDepth) {
-            if (current.memoizedProps && Object.keys(current.memoizedProps).length) {
-                const name = getComponentName(current);
-                if (name || Object.keys(current.memoizedProps).some(k => k.length > 2)) {
-                    targetFiber = current;
-                    break;
-                }
-            }
-            current = current.return ?? null;
-            depth++;
-        }
-
-        if (!targetFiber) return { found: true, selector, hasFiber: true, props: null, message: "No component with meaningful props found" };
+        const targetFiber = walkFiberUp(fiber, maxDepth, f =>
+            !!f.memoizedProps && Object.keys(f.memoizedProps).length > 0 &&
+            (!!getComponentName(f) || Object.keys(f.memoizedProps).some(k => k.length > 2))
+        );
+        if (!targetFiber) return { found: true, selector, hasFiber: true, props: null, message: "No component with props found" };
 
         const props: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(targetFiber.memoizedProps ?? {})) {
@@ -421,28 +419,16 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     }
 
     if (action === "hooks") {
-        if (!fiber) return { found: true, selector, hasFiber: false, hooks: null, message: "No React fiber found" };
+        if (!fiber) return { found: true, selector, hasFiber: false, hooks: null, message: "No fiber found" };
 
-        let current: ReactFiber | null = fiber;
-        let depth = 0;
-        let targetFiber: ReactFiber | null = null;
-
-        while (current && depth < maxDepth) {
-            if (current.tag === 0 && current.memoizedState) {
-                targetFiber = current;
-                break;
-            }
-            current = current.return ?? null;
-            depth++;
-        }
-
-        if (!targetFiber) return { found: true, selector, hasFiber: true, hooks: null, message: "No function component with hooks found" };
+        const targetFiber = walkFiberUp(fiber, maxDepth, f => f.tag === 0 && !!f.memoizedState);
+        if (!targetFiber) return { found: true, selector, hasFiber: true, hooks: null, message: "No hooks found" };
 
         const hooks: HookInfo[] = [];
         let hookState = targetFiber.memoizedState as FiberMemoizedState | null;
         let i = 0;
 
-        while (hookState && i < 30) {
+        while (hookState && i < LIMITS.REACT.MAX_HOOKS) {
             const hookType = getHookType(hookState);
             const hook: HookInfo = { index: i, type: hookType };
 
@@ -469,7 +455,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     }
 
     if (action === "contexts") {
-        if (!fiber) return { found: true, selector, hasFiber: false, contexts: [], message: "No React fiber found" };
+        if (!fiber) return { found: true, selector, hasFiber: false, contexts: [], message: "No fiber found" };
 
         const contexts: Array<{ displayName: string | null; valueKeys: string[] | null; sample: Record<string, unknown> }> = [];
         let current: ReactFiber | null = fiber;
@@ -483,59 +469,40 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
                 if (value && typeof value === "object") {
                     const keys = Object.keys(value);
                     const sample: Record<string, unknown> = {};
-                    for (const k of keys.slice(0, 8)) sample[k] = serializeValue((value as Record<string, unknown>)[k]);
+                    for (const k of keys.slice(0, LIMITS.REACT.CONTEXT_SAMPLE_KEYS)) sample[k] = serializeValue((value as Record<string, unknown>)[k]);
 
-                    contexts.push({ displayName: contextType?.displayName ?? null, valueKeys: keys.slice(0, 15), sample });
+                    contexts.push({ displayName: contextType?.displayName ?? null, valueKeys: keys.slice(0, LIMITS.REACT.CONTEXT_VALUE_KEYS), sample });
                 }
             }
             current = current.return ?? null;
             depth++;
         }
 
-        return { found: true, selector, contextCount: contexts.length, contexts, note: !contexts.length ? "No React contexts found in the fiber tree" : undefined };
+        return { found: true, selector, contextCount: contexts.length, contexts, note: !contexts.length ? "No contexts found" : undefined };
     }
 
     if (action === "forceUpdate") {
-        if (!fiber) return { found: true, selector, success: false, message: "No React fiber found" };
+        if (!fiber) return { found: true, selector, success: false, message: "No fiber found" };
 
-        let current: ReactFiber | null = fiber;
-        let depth = 0;
-        let updated = false;
-        let updatedComponent: string | null = null;
+        const targetFiber = walkFiberUp(fiber, maxDepth, f =>
+            (f.tag === 1 && !!f.stateNode?.forceUpdate) ||
+            (f.tag === 0 && !!(f.memoizedState as FiberMemoizedState | null)?.queue?.dispatch)
+        );
 
-        while (current && depth < maxDepth && !updated) {
-            if (current.tag === 1 && current.stateNode?.forceUpdate) {
-                current.stateNode.forceUpdate();
-                updated = true;
-                updatedComponent = getComponentName(current);
-            } else if (current.tag === 0 && (current.memoizedState as FiberMemoizedState | null)?.queue?.dispatch) {
-                (current.memoizedState as FiberMemoizedState).queue!.dispatch!({});
-                updated = true;
-                updatedComponent = getComponentName(current);
-            }
-            current = current.return ?? null;
-            depth++;
-        }
+        if (!targetFiber) return { found: true, selector, success: false, message: "No updatable component found" };
 
-        return { found: true, selector, success: updated, component: updatedComponent, message: updated ? "Component re-rendered" : "No updatable component found" };
+        if (targetFiber.tag === 1) targetFiber.stateNode!.forceUpdate!();
+        else (targetFiber.memoizedState as FiberMemoizedState).queue!.dispatch!({});
+
+        return { found: true, selector, success: true, component: getComponentName(targetFiber), message: "Component re-rendered" };
     }
 
     if (action === "state") {
-        if (!fiber) return { found: true, selector, hasFiber: false, state: null, message: "No React fiber found" };
+        if (!fiber) return { found: true, selector, hasFiber: false, state: null, message: "No fiber found" };
 
-        let current: ReactFiber | null = fiber;
-        let depth = 0;
-        let targetFiber: ReactFiber | null = null;
-
-        while (current && depth < maxDepth) {
-            if ((current.tag === 1 && current.stateNode?.state) || (current.tag === 0 && current.memoizedState)) {
-                targetFiber = current;
-                break;
-            }
-            current = current.return ?? null;
-            depth++;
-        }
-
+        const targetFiber = walkFiberUp(fiber, maxDepth, f =>
+            (f.tag === 1 && !!f.stateNode?.state) || (f.tag === 0 && !!f.memoizedState)
+        );
         if (!targetFiber) return { found: true, selector, hasFiber: true, state: null, message: "No stateful component found" };
 
         const info = getComponentInfo(targetFiber);
@@ -547,7 +514,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         const stateValues: unknown[] = [];
         let hookState = targetFiber.memoizedState as FiberMemoizedState | null;
 
-        while (hookState && stateValues.length < 10) {
+        while (hookState && stateValues.length < LIMITS.REACT.STATE_VALUES_MAX) {
             if (hookState.queue?.dispatch) stateValues.push(serializeValue(hookState.memoizedState));
             hookState = hookState.next ?? null;
         }
@@ -556,7 +523,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     }
 
     if (action === "owner") {
-        if (!fiber) return { found: true, selector, hasFiber: false, owners: [], message: "No React fiber found" };
+        if (!fiber) return { found: true, selector, hasFiber: false, owners: [], message: "No fiber found" };
 
         const owners: Array<{ name: string | null; tagType: string; depth: number; propKeys?: string[] }> = [];
         let current: ReactFiber | null = fiber._debugOwner ?? fiber.return ?? null;
@@ -568,7 +535,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             if (info.tagType !== "DOM" && info.tagType !== "Text") {
                 const entry: { name: string | null; tagType: string; depth: number; propKeys?: string[] } = { name: info.name, tagType: info.tagType, depth };
                 if (includeProps && current.memoizedProps) {
-                    entry.propKeys = Object.keys(current.memoizedProps).filter(k => k !== "children" && k.length > 1).slice(0, 8);
+                    entry.propKeys = Object.keys(current.memoizedProps).filter(k => k !== "children" && k.length > 1).slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW);
                 }
                 owners.push(entry);
             }
@@ -577,7 +544,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             depth++;
         }
 
-        return { found: true, selector, ownerCount: owners.length, owners, note: !owners.length ? "No owner components found" : undefined };
+        return { found: true, selector, ownerCount: owners.length, owners, note: !owners.length ? "No owners found" : undefined };
     }
 
     return { error: true, message: `Unknown action "${action}"` };

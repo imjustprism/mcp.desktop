@@ -21,8 +21,9 @@ export {
     cleanupAllIntercepts,
     cleanupAllModuleWatches,
     cleanupAllTraces,
+    clearComponentIndexCache,
+    clearCSSIndexCache,
     getAdaptiveTimeout,
-    recordMetric,
     serializeResult,
     withTimeout,
 } from "./utils";

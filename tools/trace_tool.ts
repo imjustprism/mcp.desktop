@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { FluxDispatcher } from "@webpack/common";
+import type { FluxStore } from "@vencord/discord-types";
 
-import { ActiveTrace, FluxAction, FluxDispatcherInternal, StoreWithListeners, TraceCapture } from "../types";
-import { cleanupAllTraces, cleanupExpiredTraces, cleanupTrace, findStore, serializeResult, traceState } from "./utils";
+import { ActiveTrace, FluxAction, TraceCapture, TraceToolArgs } from "../types";
+import { getFluxDispatcherInternal, resolveStore } from "../webpack";
+import { LIMITS } from "./constants";
+import { cleanupAllTraces, cleanupExpiredTraces, cleanupTrace, serializeResult, traceState } from "./utils";
 
 function summarizeCaptures(captures: TraceCapture[], limit: number) {
     const typeCounts: Record<string, number> = {};
@@ -15,22 +17,20 @@ function summarizeCaptures(captures: TraceCapture[], limit: number) {
 
     const sliced = captures.slice(0, limit).map(c => {
         if (!c.data) return c;
-        const serialized = serializeResult(c.data, 500);
-        return { ts: c.ts, type: c.type, data: serialized.length > 500 ? serialized.slice(0, 500) + "..." : serialized };
+        const serialized = serializeResult(c.data, LIMITS.TRACE.SUMMARIZE_SERIALIZE);
+        return { ts: c.ts, type: c.type, data: serialized.length > LIMITS.TRACE.SUMMARIZE_TEXT_SLICE ? serialized.slice(0, LIMITS.TRACE.SUMMARIZE_TEXT_SLICE) + "..." : serialized };
     });
 
-    return { typeCounts, captures: sliced, truncated: captures.length > limit || undefined };
+    return { typeCounts, captures: sliced, truncated: captures.length > limit ? true : undefined };
 }
 
-export async function handleTraceTool(args: Record<string, unknown>): Promise<unknown> {
-    const action = args.action as string | undefined;
-    const traceId = args.id as number | undefined;
-    const filter = args.filter as string | undefined;
-    const duration = Math.min(Math.max(args.duration as number ?? 10000, 1000), 60000);
-    const maxCaptures = Math.min(args.maxCaptures as number ?? 100, 500);
-    const limit = args.limit as number ?? 30;
+export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
+    const { action, id: traceId, filter } = args;
+    const duration = Math.min(Math.max(args.duration ?? 10000, 1000), 60000);
+    const maxCaptures = Math.min(args.maxCaptures ?? 100, 500);
+    const limit = args.limit ?? LIMITS.TRACE.HANDLER_SLICE;
 
-    const dispatcher = FluxDispatcher as unknown as FluxDispatcherInternal;
+    const dispatcher = getFluxDispatcherInternal();
     cleanupExpiredTraces();
 
     if (action === "events") {
@@ -56,13 +56,13 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
             total: events.size,
             filtered: eventList.length,
             events: eventList.slice(0, limit),
-            note: eventList.length > limit ? "Use filter param to narrow results" : undefined
+            note: eventList.length > limit ? "Use filter to narrow" : undefined
         };
     }
 
     if (action === "handlers") {
-        const eventName = args.event as string | undefined;
-        if (!eventName) return { error: true, message: "event name required for handlers action" };
+        const eventName = args.event;
+        if (!eventName) return { error: true, message: "event required" };
 
         const ordered = dispatcher._actionHandlers?._orderedActionHandlers?.[eventName];
         const subscriptions = dispatcher._subscriptions?.[eventName];
@@ -71,29 +71,28 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
         return {
             event: eventName,
             storeHandlerCount: storeNames.length,
-            storeHandlers: storeNames.slice(0, 30),
+            storeHandlers: storeNames.slice(0, LIMITS.TRACE.HANDLER_SLICE),
             subscriptionCount: subscriptions?.size ?? 0
         };
     }
 
     if (action === "storeEvents") {
-        let storeName = args.store as string | undefined;
-        if (!storeName) return { error: true, message: "store name required" };
+        if (!args.store) return { error: true, message: "store name required" };
 
+        const resolved = resolveStore(args.store);
+        const storeName = resolved?.name ?? args.store;
         const nodes = dispatcher._actionHandlers?._dependencyGraph?.nodes;
         const events: string[] = [];
-        const resolvedName = !storeName.endsWith("Store") ? storeName + "Store" : storeName;
 
         if (nodes) {
             for (const nodeId in nodes) {
                 const node = nodes[nodeId];
-                if (node.name === resolvedName || node.name === storeName) {
+                if (node.name === storeName || node.name === args.store) {
                     events.push(...Object.keys(node.actionHandler ?? {}));
                 }
             }
         }
 
-        if (events.length && resolvedName !== storeName) storeName = resolvedName;
         return { store: storeName, eventCount: events.length, events: events.sort() };
     }
 
@@ -153,7 +152,7 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
         if (!trace) return { error: true, message: `Trace ${traceId} not found or expired` };
 
         const remaining = Math.max(0, trace.expiresAt - Date.now());
-        const summary = summarizeCaptures(trace.captures, 50);
+        const summary = summarizeCaptures(trace.captures, LIMITS.TRACE.GET_CAPTURE_SLICE);
 
         return {
             id: traceId,
@@ -175,28 +174,17 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
 
         const { captures } = trace;
         cleanupTrace(traceId);
-        const summary = summarizeCaptures(captures, 100);
+        const summary = summarizeCaptures(captures, LIMITS.TRACE.STOP_CAPTURE_SLICE);
         return { id: traceId, stopped: true, captureCount: captures.length, ...summary };
     }
 
     if (action === "store") {
-        let storeName = args.store as string | undefined;
-        if (!storeName) return { error: true, message: "store name required" };
+        if (!args.store) return { error: true, message: "store name required" };
 
-        let foundStore: StoreWithListeners | null = null;
-        try {
-            foundStore = findStore(storeName as Parameters<typeof findStore>[0]) as StoreWithListeners;
-        } catch {
-            if (!storeName.endsWith("Store")) {
-                storeName += "Store";
-                try {
-                    foundStore = findStore(storeName as Parameters<typeof findStore>[0]) as StoreWithListeners;
-                } catch { foundStore = null; }
-            }
-        }
-        if (!foundStore) return { error: true, message: `Store "${storeName}" not found` };
-
-        const store = foundStore;
+        const resolved = resolveStore(args.store);
+        if (!resolved) return { error: true, message: `Store "${args.store}" not found` };
+        const storeName = resolved.name;
+        const store = resolved.store as unknown as FluxStore;
         const id = traceState.nextId++;
         const now = Date.now();
 
@@ -223,5 +211,5 @@ export async function handleTraceTool(args: Record<string, unknown>): Promise<un
         return { id, store: storeName, duration, maxCaptures };
     }
 
-    return { error: true, message: "action: events, handlers (with event), storeEvents (with store), start (with filter), get, stop, store" };
+    return { error: true, message: "action: events, handlers, storeEvents, start, get, stop, store" };
 }

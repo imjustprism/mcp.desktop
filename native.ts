@@ -114,25 +114,14 @@ function sendError(res: ServerResponse, id: number | string | null, code: number
 }
 
 export function getNextRequest(): { id: number; request: MCPRequest } | null {
-    if (requestQueue.length === 0) return null;
+    if (!requestQueue.length) return null;
 
-    if (requestQueue.length > 1) {
-        let minIdx = 0;
-        let minPriority = requestQueue[0].priority;
-        for (let i = 1; i < requestQueue.length; i++) {
-            if (requestQueue[i].priority < minPriority) {
-                minPriority = requestQueue[i].priority;
-                minIdx = i;
-            }
-        }
-        if (minIdx !== 0) {
-            const item = requestQueue[minIdx];
-            requestQueue.splice(minIdx, 1);
-            return { id: item.id, request: item.request };
-        }
+    let bestIdx = 0;
+    for (let i = 1; i < requestQueue.length; i++) {
+        if (requestQueue[i].priority < requestQueue[bestIdx].priority) bestIdx = i;
     }
 
-    const item = requestQueue.shift()!;
+    const [item] = requestQueue.splice(bestIdx, 1);
     return { id: item.id, request: item.request };
 }
 

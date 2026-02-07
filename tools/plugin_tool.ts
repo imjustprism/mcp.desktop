@@ -6,24 +6,20 @@
 
 import { canonicalizeMatch } from "@utils/patches";
 
-import { PluginManagerAPI, PluginOption, PluginSettings, PluginToolArgs, ToolResult, VencordPlugin } from "../types";
+import { PluginOption, PluginToolArgs, ToolResult, VencordPlugin } from "../types";
+import { plugins, pluginSettings, startPlugin, stopPlugin } from "../webpack";
+import { LIMITS, OPTION_TYPE_NAMES } from "./constants";
 import { countModuleMatchesFast } from "./utils";
-
-const TYPE_NAMES: Record<number, string> = { 0: "STRING", 1: "NUMBER", 2: "BIGINT", 3: "BOOLEAN", 4: "SELECT", 5: "SLIDER", 6: "COMPONENT", 7: "CUSTOM" };
 
 export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult> {
     const { action, name, setting: settingKey, value: settingValue } = args;
     const showPatches = args.showPatches ?? false;
     const validate = args.validate ?? false;
 
-    const { plugins } = Vencord.Plugins;
-    const { startPlugin, stopPlugin } = Vencord.Api.PluginManager as PluginManagerAPI;
-    const Settings = Vencord.Settings as { plugins: Record<string, PluginSettings> };
-
     const findPlugin = (filter: string) => {
         const plugin = plugins[filter] as VencordPlugin | undefined;
         if (plugin) return { plugin, name: filter };
-        const similar = Object.keys(plugins).filter(n => n.toLowerCase().includes(filter.toLowerCase())).slice(0, 5);
+        const similar = Object.keys(plugins).filter(n => n.toLowerCase().includes(filter.toLowerCase())).slice(0, LIMITS.PLUGIN.SUGGESTIONS);
         return { error: true, message: `Plugin "${filter}" not found`, suggestions: similar.length ? similar : undefined };
     };
 
@@ -34,30 +30,30 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         if ("error" in result) return result;
         const { plugin, name: pluginName } = result;
 
-        if (plugin.required) return { error: true, message: `Plugin "${pluginName}" is required and cannot be disabled` };
+        if (plugin.required) return { error: true, message: `"${pluginName}" is required` };
 
         const isEnabled = plugin.started ?? false;
         const shouldEnable = action === "toggle" ? !isEnabled : action === "enable";
 
         if (shouldEnable === isEnabled) {
-            return { success: true, name: pluginName, enabled: isEnabled, message: `Plugin already ${isEnabled ? "enabled" : "disabled"}` };
+            return { success: true, name: pluginName, enabled: isEnabled, message: `Already ${isEnabled ? "enabled" : "disabled"}` };
         }
 
         const hasPatches = plugin.patches?.length;
         if (hasPatches) {
-            Settings.plugins[pluginName].enabled = shouldEnable;
-            return { success: true, name: pluginName, enabled: shouldEnable, requiresRestart: true, message: `Plugin ${shouldEnable ? "enabled" : "disabled"}, restart required to apply patches` };
+            pluginSettings[pluginName].enabled = shouldEnable;
+            return { success: true, name: pluginName, enabled: shouldEnable, requiresRestart: true, message: `${shouldEnable ? "Enabled" : "Disabled"}, restart required` };
         }
 
         if (shouldEnable) {
-            Settings.plugins[pluginName].enabled = true;
-            const success = startPlugin(plugin);
-            return { success, name: pluginName, enabled: success, message: success ? "Plugin enabled" : "Failed to start plugin" };
+            pluginSettings[pluginName].enabled = true;
+            const success = startPlugin(plugin as Parameters<typeof startPlugin>[0]);
+            return { success, name: pluginName, enabled: success, message: success ? "Enabled" : "Failed to start" };
         }
 
-        const success = stopPlugin(plugin);
-        if (success) Settings.plugins[pluginName].enabled = false;
-        return { success, name: pluginName, enabled: !success, message: success ? "Plugin disabled" : "Failed to stop plugin" };
+        const success = stopPlugin(plugin as Parameters<typeof stopPlugin>[0]);
+        if (success) pluginSettings[pluginName].enabled = false;
+        return { success, name: pluginName, enabled: !success, message: success ? "Disabled" : "Failed to stop" };
     }
 
     if (action === "settings" || action === "setSetting") {
@@ -67,7 +63,7 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         if ("error" in result) return result;
         const { plugin, name: pluginName } = result;
 
-        const pluginSettings = Settings.plugins[pluginName] ?? {};
+        const currentSettings = pluginSettings[pluginName] ?? {};
         const options = plugin.options ?? {};
 
         if (action === "settings") {
@@ -76,9 +72,9 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
             for (const [key, opt] of Object.entries(options) as [string, PluginOption][]) {
                 const o = opt as unknown as Record<string, unknown>;
                 settingsInfo[key] = {
-                    type: TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN",
+                    type: OPTION_TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN",
                     description: o.description as string | undefined,
-                    currentValue: pluginSettings[key] ?? o.default,
+                    currentValue: currentSettings[key] ?? o.default,
                     default: o.default,
                     options: o.options
                 };
@@ -89,11 +85,11 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
 
         if (!settingKey) return { error: true, message: "setting key required for setSetting" };
         if (!(settingKey in options)) {
-            return { error: true, message: `Setting "${settingKey}" not found in plugin "${pluginName}"`, availableSettings: Object.keys(options) };
+            return { error: true, message: `Setting "${settingKey}" not found`, availableSettings: Object.keys(options) };
         }
 
-        const oldValue = pluginSettings[settingKey];
-        Settings.plugins[pluginName][settingKey] = settingValue;
+        const oldValue = currentSettings[settingKey];
+        pluginSettings[pluginName][settingKey] = settingValue;
         return { success: true, name: pluginName, setting: settingKey, oldValue, newValue: settingValue };
     }
 
@@ -103,7 +99,7 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         pluginList = pluginList.filter(([nm]) => nm.toLowerCase().includes(lower));
     }
 
-    const maxPlugins = name ? 50 : 20;
+    const maxPlugins = name ? LIMITS.PLUGIN.LIST_MAX_FILTERED : LIMITS.PLUGIN.LIST_MAX_DEFAULT;
     const pluginInfos = pluginList.slice(0, maxPlugins).map(([nm, plugin]) => {
         const patchCount = plugin.patches?.length ?? 0;
         const info: Record<string, unknown> = { name: nm, enabled: plugin.started ?? false };
@@ -115,8 +111,8 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         if (plugin.required) info.required = true;
 
         if (showPatches && plugin.patches) {
-            info.patches = plugin.patches.slice(0, 10).map(p => ({
-                find: String(typeof p.find === "string" ? p.find : p.find).slice(0, 100),
+            info.patches = plugin.patches.slice(0, LIMITS.PLUGIN.PATCHES_SLICE).map(p => ({
+                find: String(typeof p.find === "string" ? p.find : p.find).slice(0, LIMITS.PLUGIN.FIND_SLICE),
                 replacementCount: Array.isArray(p.replacement) ? p.replacement.length : 1
             }));
         }

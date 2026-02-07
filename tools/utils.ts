@@ -6,25 +6,31 @@
 
 import { getIntlMessageFromHash } from "@utils/discord";
 import { runtimeHashMessageKey } from "@utils/intlHash";
-import { factoryListeners, findAll, findStore, wreq } from "@webpack";
-import { Flux, FluxDispatcher, i18n } from "@webpack/common";
 import { WebpackPatcher } from "Vencord";
 
 import keyMapJson from "../map/key_map.json";
 import {
     ActiveTrace,
+    AnchorCandidate,
     BatchResult,
+    ComponentIndex,
     ComponentInfo,
+    CSSClassEntry,
+    CSSIndexCache,
+    CSSModuleInfo,
     FiberMemoizedState,
     FluxAction,
-    FluxDispatcherInternal,
     FunctionIntercept,
     ModuleWatch,
     PluginPatch,
     PluginReplacement,
     ReactFiber,
+    StoryControl,
+    StoryEntry,
     WebpackModule,
 } from "../types";
+import { factoryListeners, findAll, findStore, Flux, getFluxDispatcherInternal, getIconsModuleId, getUIBarrelModuleId, i18n, IconsModule, plugins, UIBarrelModule, wreq } from "../webpack";
+import { createIntlKeyPatternRegex, CSS_CLASS_RE, LIMITS, MANA_COMPONENT_RE, REGEX_CACHE_MAX_SIZE } from "./constants";
 
 const KEY_MAP: Record<string, string> = keyMapJson;
 const { getFactoryPatchedSource, getFactoryPatchedBy } = WebpackPatcher;
@@ -35,7 +41,7 @@ export function getCachedRegex(pattern: string, flags = ""): RegExp {
     const key = `${pattern}\0${flags}`;
     let regex = regexCache.get(key);
     if (!regex) {
-        if (regexCache.size >= 100) regexCache.delete(regexCache.keys().next().value!);
+        if (regexCache.size >= REGEX_CACHE_MAX_SIZE) regexCache.delete(regexCache.keys().next().value!);
         regex = new RegExp(pattern, flags);
         regexCache.set(key, regex);
     }
@@ -213,7 +219,7 @@ export function buildIntlHashToKeyMap(): Map<string, string> {
 
     for (const [hash, key] of Object.entries(KEY_MAP)) intlHashToKeyMap.set(hash, key);
 
-    const keyPattern = /#\{intl::([A-Z][A-Z0-9_]*)/g;
+    const keyPattern = createIntlKeyPatternRegex(true);
     const extract = (str: string) => {
         let m: RegExpExecArray | null;
         while ((m = keyPattern.exec(str))) {
@@ -223,7 +229,7 @@ export function buildIntlHashToKeyMap(): Map<string, string> {
 
     for (const id of getModuleIds()) extract(getModuleSource(id));
 
-    for (const plugin of Object.values(Vencord.Plugins.plugins)) {
+    for (const plugin of Object.values(plugins)) {
         if (!plugin.patches) continue;
         for (const patch of plugin.patches as PluginPatch[]) {
             if (typeof patch.find === "string") extract(patch.find);
@@ -256,82 +262,42 @@ export function searchModulesOptimized(predicate: (source: string, id: string) =
 
 export function serializeResult(value: unknown, maxLength = 50000): string {
     const seen = new WeakSet();
-    const parts: string[] = [];
-    let length = 0;
+    let depth = 0;
 
-    const write = (s: string): boolean => {
-        if (length + s.length > maxLength) {
-            parts.push(s.slice(0, maxLength - length));
-            length = maxLength;
-            return false;
-        }
-        parts.push(s);
-        length += s.length;
-        return true;
-    };
-
-    const serialize = (val: unknown, depth: number): boolean => {
-        if (length >= maxLength) return false;
-        if (depth > 10) return write('"[Max Depth]"');
-        if (val === null || val === undefined) return write("null");
-
-        const type = typeof val;
-        if (type === "string") {
-            const escaped = JSON.stringify(val);
-            return write(escaped.length > 1000 ? escaped.slice(0, 1000) + '..."' : escaped);
-        }
-        if (type === "number" || type === "boolean") return write(String(val));
-        if (type === "bigint") return write(`"${val}n"`);
-        if (type === "symbol") return write(`"${val.toString()}"`);
-        if (type === "function") {
-            const str = (val as () => void).toString();
-            return write(JSON.stringify(str.length > 500 ? str.slice(0, 500) + "..." : str));
-        }
-
-        if (type === "object") {
-            if (seen.has(val as object)) return write('"[Circular]"');
-            seen.add(val as object);
-
-            if (val instanceof RegExp) return write(`"${val.toString()}"`);
-            if (val instanceof Error) {
-                write('{"error":');
-                write(JSON.stringify(val.message));
-                if (val.stack) {
-                    write(',"stack":');
-                    write(JSON.stringify(val.stack.slice(0, 500)));
-                }
-                return write("}");
+    const sanitize = (val: unknown): unknown => {
+        if (val == null) return null;
+        switch (typeof val) {
+            case "bigint": return `${val}n`;
+            case "symbol": return val.toString();
+            case "function": {
+                const str = val.toString();
+                return str.length > 500 ? str.slice(0, 500) + "..." : str;
             }
-            if (val instanceof Map) return serialize(Object.fromEntries(val), depth);
-            if (val instanceof Set) return serialize([...val].slice(0, 50), depth);
-
-            if (Array.isArray(val)) {
-                if (!write("[")) return false;
-                const len = Math.min(val.length, 100);
-                for (let i = 0; i < len; i++) {
-                    if (i > 0 && !write(",")) return false;
-                    if (!serialize(val[i], depth + 1)) return false;
-                }
-                return write("]");
+            case "object": {
+                if (seen.has(val)) return "[Circular]";
+                seen.add(val);
+                if (depth > 10) return "[Max Depth]";
+                depth++;
+                try {
+                    if (val instanceof RegExp) return val.toString();
+                    if (val instanceof Error) return { error: val.message, stack: val.stack?.slice(0, 500) };
+                    if (val instanceof Map) return sanitize(Object.fromEntries(val));
+                    if (val instanceof Set) return sanitize([...val].slice(0, 50));
+                    if (Array.isArray(val)) return val.slice(0, 100).map(sanitize);
+                    const obj: Record<string, unknown> = {};
+                    const keys = Object.keys(val).filter(k => (val as Record<string, unknown>)[k] !== undefined);
+                    for (const k of keys.slice(0, 50)) obj[k] = sanitize((val as Record<string, unknown>)[k]);
+                    return obj;
+                } finally { depth--; }
             }
-
-            if (!write("{")) return false;
-            const keys = Object.keys(val).filter(k => (val as Record<string, unknown>)[k] !== undefined);
-            const len = Math.min(keys.length, 50);
-            for (let i = 0; i < len; i++) {
-                if (i > 0 && !write(",")) return false;
-                if (!write(JSON.stringify(keys[i]) + ":")) return false;
-                if (!serialize((val as Record<string, unknown>)[keys[i]], depth + 1)) return false;
-            }
-            return write("}");
+            case "string": return val.length > 1000 ? val.slice(0, 1000) + "..." : val;
+            default: return val;
         }
-
-        return write(String(val));
     };
 
     try {
-        serialize(value, 0);
-        return length >= maxLength ? parts.join("") + "\n... [truncated]" : parts.join("");
+        const json = JSON.stringify(sanitize(value));
+        return json.length > maxLength ? json.slice(0, maxLength) + "\n... [truncated]" : json;
     } catch {
         return String(value);
     }
@@ -359,29 +325,19 @@ export function getAllStoreNames(): string[] {
         .sort();
 }
 
-const TOOL_TIMEOUTS: Record<string, number> = {
-    trace: 120000,
-    intercept: 120000,
-    module: 60000,
-    intl: 60000,
-};
-
 export function getAdaptiveTimeout(toolName: string, args?: Record<string, unknown>): number {
     if (toolName === "module" && args?.action === "loadLazy") return 120000;
     if (toolName === "intl" && args?.action === "bruteforce") return 300000;
-    return TOOL_TIMEOUTS[toolName] ?? 5000;
+    if (toolName === "trace" || toolName === "intercept") return 120000;
+    if (toolName === "module" || toolName === "intl") return 60000;
+    return 5000;
 }
 
-export function recordMetric(_toolName: string, _elapsed: number): void { }
-
 export function withTimeout<T>(promise: Promise<T>, ms: number, toolName: string): Promise<T> {
-    let timeoutId: ReturnType<typeof setTimeout>;
-    return Promise.race([
-        promise.finally(() => clearTimeout(timeoutId)),
-        new Promise<never>((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error(`"${toolName}" timed out (${ms}ms)`)), ms);
-        })
-    ]);
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`"${toolName}" timed out (${ms}ms)`)), ms);
+        promise.then(resolve, reject).finally(() => clearTimeout(timer));
+    });
 }
 
 export function parseRegex(pattern: string): RegExp | null {
@@ -400,15 +356,21 @@ export function cleanupIntercept(id: number): boolean {
     const intercept = interceptState.active.get(id);
     if (!intercept) return false;
 
-    const mod = wreq.c[intercept.moduleId] as WebpackModule | undefined;
-    if (mod) {
+    if (intercept.methodKey && intercept.methodParent) {
         try {
-            if (intercept.exportKey === "module") {
-                Object.defineProperty(mod, "exports", { value: intercept.original, configurable: true, writable: true });
-            } else if (mod.exports) {
-                Object.defineProperty(mod.exports, intercept.exportKey, { value: intercept.original, configurable: true, writable: true });
-            }
-        } catch { /* shhhh */ }
+            intercept.methodParent[intercept.methodKey] = intercept.original;
+        } catch { /* property not writable */ }
+    } else {
+        const mod = wreq.c[intercept.moduleId] as WebpackModule | undefined;
+        if (mod) {
+            try {
+                if (intercept.exportKey === "module") {
+                    Object.defineProperty(mod, "exports", { value: intercept.original, configurable: true, writable: true });
+                } else if (mod.exports) {
+                    Object.defineProperty(mod.exports, intercept.exportKey, { value: intercept.original, configurable: true, writable: true });
+                }
+            } catch { /* property not configurable */ }
+        }
     }
     interceptState.active.delete(id);
     return true;
@@ -433,7 +395,7 @@ export function cleanupTrace(id: number): boolean {
     traceState.active.delete(id);
 
     if (!traceState.active.size && traceState.interceptor) {
-        const dispatcher = FluxDispatcher as unknown as FluxDispatcherInternal;
+        const dispatcher = getFluxDispatcherInternal();
         const idx = dispatcher._interceptors?.indexOf(traceState.interceptor);
         if (idx !== undefined && idx >= 0) dispatcher._interceptors?.splice(idx, 1);
         traceState.interceptor = null;
@@ -557,6 +519,249 @@ export function getHookType(hook: FiberMemoizedState): string {
     if (Array.isArray(hook.deps) && ms !== undefined) return "useMemo";
     if (ms && typeof ms === "object") return "useContext";
     return "unknown";
+}
+
+let cssCache: CSSIndexCache | null = null;
+
+export function isRenderedClassName(input: string): boolean {
+    return CSS_CLASS_RE.test(input);
+}
+
+function isCSSModule(exports: unknown): boolean {
+    if (!exports || typeof exports !== "object") return false;
+    const keys = Object.keys(exports);
+    return keys.length >= 3 && keys.every(k => {
+        const v = (exports as Record<string, unknown>)[k];
+        return typeof v === "string" && CSS_CLASS_RE.test(v);
+    });
+}
+
+function buildCSSIndex(): CSSIndexCache {
+    const index = new Map<string, CSSClassEntry>();
+    const modules = new Map<string, CSSModuleInfo>();
+
+    for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
+        if (!mod?.exports || !isCSSModule(mod.exports)) continue;
+        const exp = mod.exports as Record<string, string>;
+        const keys = Object.keys(exp);
+        const firstVal = exp[keys[0]];
+        const hashIdx = firstVal.lastIndexOf("_");
+        const hash = hashIdx !== -1 ? firstVal.slice(hashIdx + 1) : "";
+        const classes: Record<string, string> = {};
+
+        for (const k of keys) {
+            const v = exp[k];
+            classes[k] = v;
+            const semIdx = v.lastIndexOf("_");
+            const semantic = semIdx !== -1 ? v.slice(0, semIdx) : v;
+            index.set(v, { moduleId: id, key: k, semantic, hash });
+        }
+
+        modules.set(id, { classCount: keys.length, hash, classes });
+    }
+
+    return { index, modules, builtAt: Date.now() };
+}
+
+export function getCSSIndex(): CSSIndexCache {
+    if (cssCache && Date.now() - cssCache.builtAt < LIMITS.CSS.INDEX_TTL_MS) return cssCache;
+    cssCache = buildCSSIndex();
+    return cssCache;
+}
+
+export function clearCSSIndexCache(): void {
+    cssCache = null;
+}
+
+export function getCSSModuleStats() {
+    const { modules } = getCSSIndex();
+    let totalClasses = 0;
+    const sorted: Array<{ moduleId: string; classCount: number; hash: string; sampleClasses: string[] }> = [];
+
+    for (const [id, info] of modules) {
+        totalClasses += info.classCount;
+        sorted.push({
+            moduleId: id,
+            classCount: info.classCount,
+            hash: info.hash,
+            sampleClasses: Object.values(info.classes).slice(0, LIMITS.CSS.SAMPLE_CLASSES),
+        });
+    }
+
+    sorted.sort((a, b) => b.classCount - a.classCount);
+
+    return {
+        totalModules: modules.size,
+        totalClasses,
+        topModules: sorted.slice(0, LIMITS.CSS.TOP_MODULES),
+    };
+}
+
+let componentCache: ComponentIndex | null = null;
+
+function buildComponentIndex(): ComponentIndex {
+    const stories: StoryEntry[] = [];
+    const manaTypes = new Map<string, string[]>();
+    const displayNames = new Map<string, Array<{ moduleId: string; key: string }>>();
+
+    const addToMap = <V>(map: Map<string, V[]>, key: string, val: V) => {
+        const arr = map.get(key);
+        if (arr) arr.push(val);
+        else map.set(key, [val]);
+    };
+
+    const getDisplayName = (val: unknown): string | undefined => {
+        if (typeof val === "function") return (val as unknown as { displayName?: string }).displayName;
+        if (val && typeof val === "object") {
+            const obj = val as Record<string, unknown>;
+            return (obj.displayName ?? (obj.render as { displayName?: string } | undefined)?.displayName) as string | undefined;
+        }
+        return undefined;
+    };
+
+    for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
+        if (!mod?.exports) continue;
+        const exp = mod.exports;
+
+        const scanExport = (val: unknown, key: string) => {
+            const dn = getDisplayName(val);
+            if (dn) addToMap(displayNames, dn, { moduleId: id, key });
+
+            if (val && typeof val === "object") {
+                const obj = val as Record<string, unknown>;
+                if (Array.isArray(obj.stories) && obj.title) {
+                    for (const story of obj.stories as Array<Record<string, unknown>>) {
+                        const controls: Record<string, StoryControl> = {};
+                        if (story.controls && typeof story.controls === "object") {
+                            for (const [ck, cv] of Object.entries(story.controls as Record<string, Record<string, unknown>>)) {
+                                controls[ck] = {
+                                    type: cv.type as string,
+                                    label: cv.label as string | undefined,
+                                    defaultValue: cv.defaultValue,
+                                    options: Array.isArray(cv.options)
+                                        ? cv.options.slice(0, LIMITS.COMPONENT.MAX_OPTIONS).map(o =>
+                                            o && typeof o === "object" && "value" in (o as object) ? (o as { value: unknown }).value : o)
+                                        : undefined,
+                                };
+                            }
+                        }
+                        stories.push({ moduleId: id, title: obj.title as string, name: story.name as string, id: story.id as string, docs: story.docs as string | undefined, controls });
+                    }
+                }
+            }
+        };
+
+        scanExport(exp, "module");
+        if (typeof exp === "object") {
+            for (const [k, v] of Object.entries(exp)) scanExport(v, k);
+        }
+    }
+
+    for (const id of Object.keys(wreq.m)) {
+        const factory = wreq.m[id];
+        if (!factory) continue;
+        const src = Function.prototype.toString.call(factory);
+        for (const m of src.matchAll(MANA_COMPONENT_RE)) {
+            addToMap(manaTypes, m[1], id);
+        }
+    }
+
+    let components = 0, enums = 0;
+    const uiBarrelId = getUIBarrelModuleId();
+    if (UIBarrelModule) {
+        for (const val of Object.values(UIBarrelModule)) {
+            if (typeof val === "function") components++;
+            else if (val && typeof val === "object") {
+                const obj = val as Record<string, unknown>;
+                if (obj.$$typeof) components++;
+                else {
+                    const vals = Object.values(obj);
+                    if (vals.length > 0 && vals.length < 30 && vals.every(v => typeof v === "string" || typeof v === "number")) enums++;
+                }
+            }
+        }
+    }
+
+    const iconCount = IconsModule ? Object.keys(IconsModule).filter(k => typeof IconsModule[k] === "function" && k.endsWith("Icon")).length : 0;
+    const iconsModuleId = getIconsModuleId();
+
+    return { stories, manaTypes, displayNames, uiBarrelId, iconsModuleId, uiBarrelStats: { components, icons: iconCount, enums }, builtAt: Date.now() };
+}
+
+export function getComponentIndex(): ComponentIndex {
+    if (componentCache && Date.now() - componentCache.builtAt < LIMITS.COMPONENT.INDEX_TTL_MS) return componentCache;
+    componentCache = buildComponentIndex();
+    return componentCache;
+}
+
+export function clearComponentIndexCache(): void {
+    componentCache = null;
+}
+
+export function extractPropsFromFunction(fn: Function): Array<{ name: string; default?: string }> {
+    const src = fn.toString().slice(0, LIMITS.COMPONENT.PROP_SRC_SLICE);
+    const match = src.match(/let\{([^}]+)\}=e/);
+    if (!match) return [];
+
+    const props: Array<{ name: string; default?: string }> = [];
+    for (const p of match[1].split(",")) {
+        if (props.length >= LIMITS.COMPONENT.MAX_PROPS) break;
+        const parts = p.trim().split(":");
+        const name = parts[0].replace(/^["']|["']$/g, "").trim();
+        if (!name || name.startsWith("...")) continue;
+        const rest = parts.slice(1).join(":").trim();
+        const defMatch = rest.match(/=(.+)/);
+        props.push({ name, default: defMatch ? defMatch[1].trim() : undefined });
+    }
+    return props;
+}
+
+export function scanSingleOccurrences(source: string, regex: RegExp, extract: (m: RegExpExecArray) => { find: string; search: string; type: string } | null, max = 10): AnchorCandidate[] {
+    const counts = new Map<string, number>();
+    const positions = new Map<string, number>();
+    const entries = new Map<string, { find: string; search: string; type: string }>();
+    let m: RegExpExecArray | null;
+
+    while ((m = regex.exec(source))) {
+        const entry = extract(m);
+        if (!entry) continue;
+        const key = entry.find;
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        if (!positions.has(key)) {
+            positions.set(key, m.index);
+            entries.set(key, entry);
+        }
+    }
+
+    const results: AnchorCandidate[] = [];
+    for (const [key, count] of counts) {
+        if (count !== 1 || results.length >= max) continue;
+        const entry = entries.get(key)!;
+        results.push({ ...entry, index: positions.get(key)! });
+    }
+    return results;
+}
+
+export function collectMethods(obj: unknown, limit = 20): string[] {
+    if (!obj || typeof obj !== "object") return [];
+    const methods = new Set<string>();
+    for (const k of Object.keys(obj)) {
+        if (typeof (obj as Record<string, unknown>)[k] === "function") methods.add(k);
+    }
+    const proto = Object.getPrototypeOf(obj);
+    if (proto && proto !== Object.prototype) {
+        for (const k of Object.getOwnPropertyNames(proto)) {
+            if (k !== "constructor" && typeof (obj as Record<string, unknown>)[k] === "function") methods.add(k);
+        }
+    }
+    return [...methods].slice(0, limit);
+}
+
+export function compareByAnchorType(a: { type: string; unique?: boolean }, b: { type: string; unique?: boolean }, typeOrder: Readonly<Record<string, number>>): number {
+    if (a.unique !== b.unique) return a.unique ? -1 : 1;
+    const aBase = a.type.replace("+ctx", "");
+    const bBase = b.type.replace("+ctx", "");
+    return (typeOrder[aBase] ?? 9) - (typeOrder[bBase] ?? 9);
 }
 
 export { findAll, findStore, getIntlMessageFromHash, KEY_MAP, runtimeHashMessageKey };

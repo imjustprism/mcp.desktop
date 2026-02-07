@@ -4,14 +4,17 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { search } from "@webpack";
+import { canonicalizeMatch } from "@utils/patches";
 
+import { SearchToolArgs } from "../types";
+import { search } from "../webpack";
+import { CONTEXT } from "./constants";
 import { getModuleSource, parseRegex } from "./utils";
 
-export async function handleSearchTool(args: Record<string, unknown>): Promise<unknown> {
-    const pattern = args.pattern as string | undefined;
-    const limit = args.limit as number ?? 10;
-    const forceRegex = args.regex as boolean ?? false;
+export async function handleSearchTool(args: SearchToolArgs): Promise<unknown> {
+    const { pattern } = args;
+    const limit = args.limit ?? 10;
+    const forceRegex = args.regex ?? false;
 
     if (!pattern) return { error: true, message: "pattern required" };
 
@@ -22,7 +25,7 @@ export async function handleSearchTool(args: Record<string, unknown>): Promise<u
         return { error: true, message: `Invalid regex: ${pattern}` };
     }
     if (regex) {
-        const searchRegex = regex;
+        const searchRegex = canonicalizeMatch(regex);
         const matches: Array<{ id: string; match: string; context: string }> = [];
         const results = search(searchRegex);
 
@@ -33,8 +36,8 @@ export async function handleSearchTool(args: Record<string, unknown>): Promise<u
             const match = source.match(searchRegex);
 
             if (match?.index !== undefined) {
-                const start = Math.max(0, match.index - 50);
-                const end = Math.min(source.length, match.index + match[0].length + 50);
+                const start = Math.max(0, match.index - CONTEXT.SEARCH_SNIPPET);
+                const end = Math.min(source.length, match.index + match[0].length + CONTEXT.SEARCH_SNIPPET);
                 matches.push({ id, match: match[0].slice(0, 100), context: source.slice(start, end) });
             }
         }
@@ -42,6 +45,7 @@ export async function handleSearchTool(args: Record<string, unknown>): Promise<u
         return { count: matches.length, pattern, matches };
     }
 
+    const canonicalized = canonicalizeMatch(pattern);
     const results = search(pattern);
     const ids = Object.keys(results).slice(0, limit);
 
@@ -50,10 +54,10 @@ export async function handleSearchTool(args: Record<string, unknown>): Promise<u
         ids,
         preview: ids.map(id => {
             const source = getModuleSource(id);
-            const idx = source.indexOf(pattern);
+            const idx = source.indexOf(canonicalized);
             if (idx !== -1) {
-                const start = Math.max(0, idx - 50);
-                const end = Math.min(source.length, idx + pattern.length + 50);
+                const start = Math.max(0, idx - CONTEXT.SEARCH_SNIPPET);
+                const end = Math.min(source.length, idx + canonicalized.length + CONTEXT.SEARCH_SNIPPET);
                 return { id, snippet: source.slice(start, end) };
             }
             return { id, snippet: source.slice(0, 200) };
