@@ -347,10 +347,21 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
 
     if (code?.length) {
         const parsedCode = code.map(c => canonicalizeMatch(c));
-        const filter = (m: unknown) => {
+        const byCode = (m: unknown) => {
             if (typeof m !== "function") return false;
             const str = Function.prototype.toString.call(m);
             return parsedCode.every(c => str.includes(c));
+        };
+        const filter = (m: unknown) => {
+            let inner = m;
+            while (inner != null) {
+                if (byCode(inner)) return true;
+                if (!(inner as any).$$typeof) return false;
+                if ((inner as any).type) inner = (inner as any).type;
+                else if ((inner as any).render) inner = (inner as any).render;
+                else return false;
+            }
+            return false;
         };
         const mods = findModulesWithIds(filter, args.all ? limit : 1);
         if (!mods.length) return { found: false, message: "No module found with that code" };

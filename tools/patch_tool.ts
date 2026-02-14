@@ -408,8 +408,10 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             };
         };
 
-        const a = benchOne("A", args.matchA, args.replaceA ?? "$&");
-        const b = benchOne("B", args.matchB, args.replaceB ?? "$&");
+        const replaceA = args.replaceA ?? "$&";
+        const replaceB = args.replaceB ?? "$&";
+        const a = benchOne("A", args.matchA, replaceA);
+        const b = benchOne("B", args.matchB, replaceB);
 
         const aMedian = (a as { medianUs?: number }).medianUs;
         const bMedian = (b as { medianUs?: number }).medianUs;
@@ -421,10 +423,184 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             speedup = ratio.toFixed(2) + "x";
         }
 
-        return { find: findStr, moduleId, moduleSize: source.length, iterations: iters, rounds: numRounds, a, b, winner, speedup };
+        let equivalent: boolean | undefined;
+        try {
+            const regexA = buildRegex(args.matchA);
+            const regexB = buildRegex(args.matchB);
+            const resultA = source.replace(regexA, replaceA);
+            const resultB = source.replace(regexB, replaceB);
+            equivalent = resultA === resultB;
+        } catch { /* */ }
+
+        return { find: findStr, moduleId, moduleSize: source.length, iterations: iters, rounds: numRounds, a, b, winner, speedup, equivalent };
     }
 
-    return { error: true, message: "action: unique, plugin, analyze, lint, finds, benchmark, compare" };
+    if (action === "slowscan") {
+        const iters = Math.min(Math.max(args.iterations ?? 1000, 100), 50000);
+        const topN = Math.min(Math.max(args.limit ?? 20, 1), 100);
+
+        const allResults: Array<{ plugin: string; patchIndex: number; replacementIndex: number; moduleId: string; moduleSize: number; match: string; coldMs: number; medianUs: number }> = [];
+
+        for (const [nm, plugin] of Object.entries(plugins) as [string, VencordPlugin][]) {
+            if (!plugin.patches?.length) continue;
+
+            for (const [patchIdx, patch] of plugin.patches.entries()) {
+                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const canonFind = canonicalizeMatch(rawFind);
+                const moduleId = searchModulesOptimized(src => src.includes(canonFind), 2)[0];
+                if (!moduleId) continue;
+
+                const source = getModuleSource(moduleId);
+                const replacements = Array.isArray(patch.replacement) ? patch.replacement : [patch.replacement];
+
+                for (const [repIdx, rep] of replacements.entries()) {
+                    if (!rep.match) continue;
+                    const regex = typeof rep.match === "string" ? new RegExp(canonicalizeMatch(rep.match)) : canonicalizeMatch(rep.match);
+                    const replaceStr = typeof rep.replace === "string" ? rep.replace : "$&";
+
+                    const coldStart = performance.now();
+                    source.replace(regex, replaceStr);
+                    const coldMs = performance.now() - coldStart;
+
+                    for (let i = 0; i < 50; i++) source.replace(regex, replaceStr);
+
+                    const start = performance.now();
+                    for (let i = 0; i < iters; i++) source.replace(regex, replaceStr);
+                    const elapsed = performance.now() - start;
+                    const medianUs = +(elapsed / iters * 1000).toFixed(2);
+
+                    allResults.push({
+                        plugin: nm,
+                        patchIndex: patchIdx,
+                        replacementIndex: repIdx,
+                        moduleId,
+                        moduleSize: source.length,
+                        match: String(rep.match).slice(0, 80),
+                        coldMs: +coldMs.toFixed(3),
+                        medianUs,
+                    });
+                }
+            }
+        }
+
+        allResults.sort((a, b) => b.medianUs - a.medianUs);
+        const slowest = allResults.slice(0, topN);
+        const flaggedSlow = allResults.filter(r => r.coldMs > 5).length;
+
+        return {
+            totalPatches: allResults.length,
+            flaggedSlow,
+            averageUs: +(allResults.reduce((s, r) => s + r.medianUs, 0) / allResults.length).toFixed(2),
+            slowest,
+        };
+    }
+
+    if (action === "conflicts") {
+        const modulePlugins = new Map<string, Array<{ plugin: string; find: string; patchIndex: number }>>();
+
+        for (const [nm, plugin] of Object.entries(plugins) as [string, VencordPlugin][]) {
+            if (!plugin.patches?.length) continue;
+            for (const [patchIdx, patch] of plugin.patches.entries()) {
+                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const canonFind = canonicalizeMatch(rawFind);
+                const moduleIds = searchModulesOptimized(src => src.includes(canonFind), 2);
+                for (const mid of moduleIds) {
+                    if (!modulePlugins.has(mid)) modulePlugins.set(mid, []);
+                    modulePlugins.get(mid)!.push({ plugin: nm, find: rawFind.slice(0, 60), patchIndex: patchIdx });
+                }
+            }
+        }
+
+        const conflicts = [...modulePlugins.entries()]
+            .filter(([, entries]) => {
+                const uniquePlugins = new Set(entries.map(e => e.plugin));
+                return uniquePlugins.size > 1;
+            })
+            .map(([moduleId, entries]) => {
+                const uniquePlugins = [...new Set(entries.map(e => e.plugin))];
+                return { moduleId, moduleSize: getModuleSource(moduleId).length, pluginCount: uniquePlugins.length, plugins: entries };
+            })
+            .sort((a, b) => b.pluginCount - a.pluginCount)
+            .slice(0, args.limit ?? 20);
+
+        return { totalConflictingModules: conflicts.length, conflicts };
+    }
+
+    if (action === "diff") {
+        const moduleId = args.id ?? (findStr ? searchModulesOptimized(src => src.includes(canonicalizeMatch(findStr)), 2)[0] : undefined);
+        if (!moduleId) return { error: true, message: "id or find required" };
+
+        const source = getModuleSource(moduleId);
+        if (!source) return { error: true, message: `Module ${moduleId} not found` };
+
+        const allPatches: Array<{ plugin: string; find: string; match: string; replace: string }> = [];
+        for (const [nm, plugin] of Object.entries(plugins) as [string, VencordPlugin][]) {
+            if (!plugin.patches?.length) continue;
+            for (const patch of plugin.patches) {
+                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const canonFind = canonicalizeMatch(rawFind);
+                if (!source.includes(canonFind)) continue;
+
+                const replacements = Array.isArray(patch.replacement) ? patch.replacement : [patch.replacement];
+                for (const rep of replacements) {
+                    allPatches.push({
+                        plugin: nm,
+                        find: rawFind.slice(0, 80),
+                        match: String(rep.match).slice(0, 120),
+                        replace: typeof rep.replace === "string" ? rep.replace.slice(0, 120) : "[function]",
+                    });
+                }
+            }
+        }
+
+        if (!allPatches.length) return { moduleId, patched: false, moduleSize: source.length, message: "No plugins target this module" };
+
+        return {
+            moduleId,
+            patched: true,
+            pluginCount: new Set(allPatches.map(p => p.plugin)).size,
+            patchCount: allPatches.length,
+            moduleSize: source.length,
+            patches: allPatches,
+        };
+    }
+
+    if (action === "broken") {
+        const unconsumed = (Vencord.WebpackPatcher as { patches: Array<{ plugin: string; find: string | RegExp; all: boolean; replacement: unknown }> }).patches.filter(p => !p.all);
+
+        const results = unconsumed.map(patch => {
+            const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+            const canonFind = canonicalizeMatch(rawFind);
+            const moduleCount = searchModulesOptimized(src => src.includes(canonFind), 5).length;
+            const usesIntl = rawFind.includes("#{intl::");
+            const info: Record<string, unknown> = {
+                plugin: patch.plugin,
+                find: rawFind.slice(0, 100),
+                moduleCount,
+            };
+
+            if (moduleCount === 0) {
+                info.reason = "Find matches no modules";
+                if (usesIntl) {
+                    const intlMatch = rawFind.match(intlKeyPattern);
+                    if (intlMatch?.[1]) {
+                        info.intlKey = intlMatch[1];
+                        const hash = runtimeHashMessageKey(intlMatch[1]);
+                        info.intlKeyValid = intlHashExistsInDefinitions(hash);
+                    }
+                    info.canonicalized = canonFind.slice(0, 100);
+                }
+            } else {
+                info.reason = "Find matched but replacements had no effect or errored";
+            }
+
+            return info;
+        });
+
+        return { totalBroken: results.length, patches: results };
+    }
+
+    return { error: true, message: "action: unique, plugin, analyze, lint, finds, benchmark, compare, slowscan, conflicts, diff, broken" };
 }
 
 function validateFinder(spec: FinderSpec): FinderResult {

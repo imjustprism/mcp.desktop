@@ -240,13 +240,13 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "patch",
-        description: "Patch validation. unique: check find matches 1 module. analyze: scan patches for NO_MATCH/MULTIPLE_MATCH. plugin: get patches with health. lint: score pattern quality. finds: validate webpack finders (findByProps/findStore/findByCode/etc) against live Discord. benchmark: time all patches for a plugin (cold + warmed). compare: A/B test two match/replace approaches. Use testPatch for full test.",
+        description: "Patch validation. unique: check find matches 1 module. analyze: scan patches for NO_MATCH/MULTIPLE_MATCH. plugin: get patches with health. lint: score pattern quality. finds: validate webpack finders (findByProps/findStore/findByCode/etc) against live Discord. benchmark: time all patches for a plugin (cold + warmed). compare: A/B test two match/replace approaches. slowscan: rank all patches by speed. conflicts: find modules patched by multiple plugins. diff: show what patches changed in a module. broken: list all unconsumed patches with diagnostics. Use testPatch for full test.",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["unique", "analyze", "plugin", "lint", "finds", "benchmark", "compare"],
+                    enum: ["unique", "analyze", "plugin", "lint", "finds", "benchmark", "compare", "slowscan", "conflicts", "diff", "broken"],
                     description: "Action to perform"
                 },
                 find: {
@@ -264,6 +264,10 @@ export const TOOLS: MCPTool[] = [
                 str: {
                     type: "string",
                     description: "Alternative to find for unique check"
+                },
+                id: {
+                    type: "string",
+                    description: "Module ID for diff action"
                 },
                 pluginName: {
                     type: "string",

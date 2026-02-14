@@ -355,7 +355,7 @@ type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "deps"
 type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods";
 type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test";
 type FluxToolAction = "events" | "types" | "dispatch" | "listeners";
-type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "benchmark" | "compare";
+type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "benchmark" | "compare" | "slowscan" | "conflicts" | "diff" | "broken";
 
 export type FinderType = "byProps" | "byCode" | "store" | "componentByCode" | "exportedComponent" | "cssClasses" | "byClassNames";
 
@@ -442,6 +442,7 @@ export interface PatchToolArgs extends BaseToolArgs {
     match?: string;
     replace?: string;
     str?: string;
+    id?: string;
     pluginName?: string;
     showNoMatch?: boolean;
     showMultiMatch?: boolean;
