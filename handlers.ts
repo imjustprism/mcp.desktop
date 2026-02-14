@@ -21,7 +21,6 @@ export {
     handleStoreTool,
     handleTestPatchTool,
     handleTraceTool,
-    recordMetric,
     serializeResult,
     withTimeout,
 } from "./tools/index";

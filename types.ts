@@ -355,7 +355,24 @@ type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "deps"
 type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods";
 type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test";
 type FluxToolAction = "events" | "types" | "dispatch" | "listeners";
-type PatchAction = "unique" | "analyze" | "plugin" | "lint";
+type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "benchmark" | "compare";
+
+export type FinderType = "byProps" | "byCode" | "store" | "componentByCode" | "exportedComponent" | "cssClasses" | "byClassNames";
+
+export interface FinderSpec {
+    type: FinderType;
+    args: string[];
+    plugin?: string;
+}
+
+export interface FinderResult {
+    type: FinderType;
+    args: string[];
+    plugin?: string;
+    found: boolean;
+    exportType?: string;
+    error?: string;
+}
 type ReactAction = "query" | "styles" | "modify" | "tree" | "text" | "path" | "fiber" | "props" | "hooks" | "contexts" | "find" | "forceUpdate" | "state" | "owner" | "root";
 type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "memory" | "performance" | "gateway" | "waitForIpc" | "constants" | "experiments" | "platform" | "tokens" | "icons";
 type TraceAction = "events" | "handlers" | "storeEvents" | "start" | "get" | "stop" | "store";
@@ -429,6 +446,13 @@ export interface PatchToolArgs extends BaseToolArgs {
     showNoMatch?: boolean;
     showMultiMatch?: boolean;
     showValid?: boolean;
+    finders?: FinderSpec[];
+    iterations?: number;
+    rounds?: number;
+    matchA?: string;
+    matchB?: string;
+    replaceA?: string;
+    replaceB?: string;
 }
 
 export interface ReactToolArgs extends BaseToolArgs {
@@ -487,6 +511,9 @@ export interface TestPatchToolArgs {
     find?: string;
     match?: string;
     replace?: string;
+    benchmark?: boolean;
+    iterations?: number;
+    rounds?: number;
 }
 
 export interface PluginToolArgs {

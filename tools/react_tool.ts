@@ -197,7 +197,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             return { error: true, message: `Invalid selector "${selector}": ${e instanceof Error ? e.message : "syntax error"}` };
         }
 
-        const results: Array<{ index: number; tagName: string; id: string | null; className: string | null; cssHint?: string; attributes: Record<string, string>; text?: string; rect: { top: number; left: number; width: number; height: number } }> = [];
+        const results: Array<{ index: number; tagName: string; id?: string; className: string | null; cssHint?: string; attributes: Record<string, string>; text?: string; rect: { top: number; left: number; width: number; height: number } }> = [];
 
         for (let i = 0; i < Math.min(elements.length, limit); i++) {
             const elem = elements[i];
@@ -214,7 +214,7 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             const entry: typeof results[0] = {
                 index: i,
                 tagName: elem.tagName,
-                id: elem.id || null,
+                id: elem.id || undefined,
                 className: classStr.slice(0, LIMITS.REACT.CLASS_NAME_SLICE) || null,
                 attributes: attrs,
                 rect: { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width), height: Math.round(rect.height) }

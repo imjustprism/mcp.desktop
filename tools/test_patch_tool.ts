@@ -389,6 +389,40 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
         }
     }
 
+    let benchmarkResult: Record<string, unknown> | undefined;
+    if (args.benchmark && matchWorks && targetModule && replaceStr != null) {
+        const iters = Math.min(Math.max(args.iterations ?? 10000, 100), 100000);
+        const numRounds = Math.min(Math.max(args.rounds ?? 3, 1), 10);
+
+        const coldStart = performance.now();
+        targetModule.replace(regex, replaceStr);
+        const coldMs = performance.now() - coldStart;
+
+        for (let i = 0; i < Math.min(iters, 500); i++) targetModule.replace(regex, replaceStr);
+
+        const roundResults: number[] = [];
+        for (let r = 0; r < numRounds; r++) {
+            const start = performance.now();
+            for (let i = 0; i < iters; i++) targetModule.replace(regex, replaceStr);
+            roundResults.push(performance.now() - start);
+        }
+
+        const perOp = roundResults.map(t => t / iters);
+        const median = [...perOp].sort((a, b) => a - b)[Math.floor(perOp.length / 2)];
+        const min = Math.min(...perOp);
+
+        benchmarkResult = {
+            coldShotMs: +coldMs.toFixed(3),
+            wouldFlagSlow: coldMs > 5,
+            iterations: iters,
+            rounds: numRounds,
+            moduleSize: targetModule.length,
+            medianPerOp: +(median * 1000).toFixed(2) + "μs",
+            minPerOp: +(min * 1000).toFixed(2) + "μs",
+            roundsPerOp: perOp.map(t => +(t * 1000).toFixed(2) + "μs"),
+        };
+    }
+
     return {
         find: rawFind,
         findCanonicalized: findStr !== rawFind ? findStr : undefined,
@@ -411,5 +445,6 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
         findContext,
         nearbyAnchors: nearbyAnchors?.length ? nearbyAnchors : undefined,
         suggestedFinds: suggestedFinds?.length ? suggestedFinds : undefined,
+        benchmark: benchmarkResult,
     };
 }

@@ -240,13 +240,13 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "patch",
-        description: "Patch validation. unique: check find matches 1 module. analyze: scan patches for NO_MATCH/MULTIPLE_MATCH. plugin: get patches with health. lint: score pattern quality. Use testPatch for full test.",
+        description: "Patch validation. unique: check find matches 1 module. analyze: scan patches for NO_MATCH/MULTIPLE_MATCH. plugin: get patches with health. lint: score pattern quality. finds: validate webpack finders (findByProps/findStore/findByCode/etc) against live Discord. benchmark: time all patches for a plugin (cold + warmed). compare: A/B test two match/replace approaches. Use testPatch for full test.",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["unique", "analyze", "plugin", "lint"],
+                    enum: ["unique", "analyze", "plugin", "lint", "finds", "benchmark", "compare"],
                     description: "Action to perform"
                 },
                 find: {
@@ -288,6 +288,56 @@ export const TOOLS: MCPTool[] = [
                     type: "number",
                     description: "Max results",
                     default: 20
+                },
+                finders: {
+                    type: "array",
+                    description: "Array of webpack finder specs to validate (for finds action). Each: {type: 'byProps'|'byCode'|'store'|'componentByCode'|'exportedComponent'|'cssClasses', args: string[], plugin?: string}",
+                    items: {
+                        type: "object",
+                        properties: {
+                            type: {
+                                type: "string",
+                                enum: ["byProps", "byCode", "store", "componentByCode", "exportedComponent", "cssClasses", "byClassNames"],
+                                description: "Finder type matching the webpack function used"
+                            },
+                            args: {
+                                type: "array",
+                                items: { type: "string" },
+                                description: "Arguments passed to the finder"
+                            },
+                            plugin: {
+                                type: "string",
+                                description: "Plugin name for attribution"
+                            }
+                        },
+                        required: ["type", "args"]
+                    }
+                },
+                iterations: {
+                    type: "number",
+                    description: "Iterations per round for benchmark/compare (100-100000)",
+                    default: 10000
+                },
+                rounds: {
+                    type: "number",
+                    description: "Number of benchmark rounds (1-10)",
+                    default: 3
+                },
+                matchA: {
+                    type: "string",
+                    description: "First match pattern for compare (/regex/flags)"
+                },
+                matchB: {
+                    type: "string",
+                    description: "Second match pattern for compare (/regex/flags)"
+                },
+                replaceA: {
+                    type: "string",
+                    description: "First replacement for compare"
+                },
+                replaceB: {
+                    type: "string",
+                    description: "Second replacement for compare"
                 }
             }
         }
@@ -477,7 +527,7 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "testPatch",
-        description: "Test patch before writing. Checks find uniqueness, applies match regex, validates captures, previews replacement. Shows canonicalized regex, match context, nearby anchors. Returns VALID/FIND_NOT_UNIQUE/MATCH_FAILED.",
+        description: "Test patch before writing. Checks find uniqueness, applies match regex, validates captures, previews replacement. Shows canonicalized regex, match context, nearby anchors. Returns VALID/FIND_NOT_UNIQUE/MATCH_FAILED. benchmark: run replace in tight loop to measure speed.",
         inputSchema: {
             type: "object",
             properties: {
@@ -492,6 +542,21 @@ export const TOOLS: MCPTool[] = [
                 replace: {
                     type: "string",
                     description: "Replacement to preview"
+                },
+                benchmark: {
+                    type: "boolean",
+                    description: "Run replacement in tight loop to measure speed (requires replace)",
+                    default: false
+                },
+                iterations: {
+                    type: "number",
+                    description: "Iterations per round for benchmark (100-100000)",
+                    default: 10000
+                },
+                rounds: {
+                    type: "number",
+                    description: "Number of benchmark rounds (1-10)",
+                    default: 3
                 }
             },
             required: ["find", "match"]

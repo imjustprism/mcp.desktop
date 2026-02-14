@@ -29,6 +29,7 @@ export const PlatformUtilsModule = findByPropsLazy("isWindows", "isLinux") as Pl
 export const DesignTokensModule = findByPropsLazy("unsafe_rawColors", "colors") as DesignTokens;
 
 export const Endpoints = Constants.Endpoints as Record<string, unknown>;
+export const DiscordConstants = Constants as unknown as Record<string, unknown>;
 
 export function getSnowflakeUtils(): SnowflakeUtilsType {
     return SnowflakeUtils as unknown as SnowflakeUtilsType;

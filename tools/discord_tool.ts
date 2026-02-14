@@ -7,7 +7,7 @@
 import { ChannelStore, GuildStore, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
 
 import { DiscordAPIError, DiscordToolArgs, ToolResult } from "../types";
-import { DesignTokensModule, Endpoints, ExperimentStore, findAll, GatewayConnectionStore, getCommonModules, getSnowflakeUtils, IconUtilsModule, PlatformUtilsModule } from "../webpack";
+import { DesignTokensModule, DiscordConstants, Endpoints, ExperimentStore, findAll, GatewayConnectionStore, getCommonModules, getSnowflakeUtils, IconUtilsModule, PlatformUtilsModule } from "../webpack";
 import { LIMITS } from "./constants";
 import { serializeResult } from "./utils";
 
@@ -185,12 +185,42 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
     }
 
     if (action === "constants") {
-        let entries = Object.entries(Endpoints ?? {});
-        if (filterPattern) entries = entries.filter(([k]) => k.toLowerCase().includes(filterPattern.toLowerCase()));
-        return {
-            count: entries.length,
-            entries: Object.fromEntries(entries.slice(0, LIMITS.DISCORD.ENDPOINTS_FILTERED).map(([k, v]) => [k, typeof v === "function" ? (v as (id1: string, id2: string) => string)("ID1", "ID2").slice(0, LIMITS.DISCORD.ENDPOINT_VALUE_SLICE) : v]))
-        };
+        if (!DiscordConstants) return { error: true, message: "Constants not found" };
+
+        const categories = Object.keys(DiscordConstants);
+
+        if (filterPattern) {
+            const lower = filterPattern.toLowerCase();
+            const matching = categories.filter(k => k.toLowerCase().includes(lower));
+
+            if (!matching.length) return { count: 0, categories: [], message: `No constant categories matching "${filterPattern}"` };
+
+            const results: Record<string, unknown> = {};
+            for (const key of matching.slice(0, LIMITS.DISCORD.ENDPOINTS_FILTERED)) {
+                const val = DiscordConstants[key];
+                if (val && typeof val === "object") {
+                    const entries = Object.entries(val as Record<string, unknown>);
+                    results[key] = {
+                        type: typeof val,
+                        keyCount: entries.length,
+                        sample: Object.fromEntries(entries.slice(0, 20).map(([k, v]) => [k, typeof v === "function" ? "(function)" : v]))
+                    };
+                } else {
+                    results[key] = val;
+                }
+            }
+            return { count: matching.length, entries: results };
+        }
+
+        const summary: Record<string, { type: string; keyCount?: number }> = {};
+        for (const key of categories) {
+            const val = DiscordConstants[key];
+            summary[key] = {
+                type: typeof val,
+                keyCount: val && typeof val === "object" ? Object.keys(val as object).length : undefined
+            };
+        }
+        return { count: categories.length, categories: summary };
     }
 
     if (action === "experiments") {
