@@ -351,9 +351,26 @@ export interface ToolError {
 
 export type ToolResult<T = Record<string, unknown>> = T | ToolError;
 
-type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "deps" | "size" | "ids" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate" | "css" | "components";
+type ModuleAction =
+    | "find"
+    | "extract"
+    | "exports"
+    | "context"
+    | "diff"
+    | "deps"
+    | "size"
+    | "ids"
+    | "stats"
+    | "loadLazy"
+    | "watch"
+    | "watchGet"
+    | "watchStop"
+    | "suggest"
+    | "annotate"
+    | "css"
+    | "components";
 type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods";
-type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test";
+type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test" | "unknown";
 type FluxToolAction = "events" | "types" | "dispatch" | "listeners";
 type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "benchmark" | "compare" | "slowscan" | "conflicts" | "diff" | "broken";
 
@@ -374,7 +391,22 @@ export interface FinderResult {
     error?: string;
 }
 type ReactAction = "query" | "styles" | "modify" | "tree" | "text" | "path" | "fiber" | "props" | "hooks" | "contexts" | "find" | "forceUpdate" | "state" | "owner" | "root";
-type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "memory" | "performance" | "gateway" | "waitForIpc" | "constants" | "experiments" | "platform" | "tokens" | "icons";
+type DiscordAction =
+    | "context"
+    | "api"
+    | "snowflake"
+    | "endpoints"
+    | "common"
+    | "enum"
+    | "memory"
+    | "performance"
+    | "gateway"
+    | "waitForIpc"
+    | "constants"
+    | "experiments"
+    | "platform"
+    | "tokens"
+    | "icons";
 type TraceAction = "events" | "handlers" | "storeEvents" | "start" | "get" | "stop" | "store";
 type InterceptAction = "set" | "get" | "stop";
 type PluginAction = "list" | "enable" | "disable" | "toggle" | "settings" | "setSetting";
@@ -712,6 +744,8 @@ export interface PatternData {
     parts: string[];
     prefixes: string[];
     prefixes2: string[];
+    prefixes3: string[];
     suffixes: string[];
     suffixes2: string[];
+    suffixes3: string[];
 }

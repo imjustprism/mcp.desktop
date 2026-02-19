@@ -6,36 +6,60 @@
 
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";
 
-import { MCPRequest, MCPResponse, ServerStats, ServerStatus } from "./types";
+import { JSONValue, MCPRequest, MCPResponse, ServerStats, ServerStatus } from "./types";
 
 const PORT = 8486;
 const HOST = "127.0.0.1";
 const MAX_BODY_SIZE = 65536;
-const REQUEST_TIMEOUT = 30000;
+
+const enum RPCError {
+    ParseError = -32700,
+    InvalidRequest = -32600,
+    MethodNotFound = -32601,
+    InvalidParams = -32602,
+    InternalError = -32603,
+    Timeout = -32001,
+    ServerBusy = -32002,
+    RendererUnavailable = -32003,
+}
+
+const TIMEOUT_MS: Record<string, number> = {
+    default: 30_000,
+    "intl:bruteforce": 600_000,
+    "intl:test": 120_000,
+    "intl:unknown": 60_000,
+    "module:loadLazy": 120_000,
+    "module:watch": 120_000,
+    "module:watchGet": 60_000,
+    "module:components": 120_000,
+    "trace:start": 120_000,
+    "trace:store": 120_000,
+    "intercept:set": 120_000,
+    "patch:benchmark": 60_000,
+    "patch:slowscan": 60_000,
+    "patch:analyze": 60_000,
+    "patch:finds": 60_000,
+    "discord:waitForIpc": 30_000,
+};
 
 function getRequestTimeout(request: MCPRequest): number {
-    if (request.method === "tools/call" && request.params?.name === "intl") {
-        const args = request.params.arguments as Record<string, unknown> | undefined;
-        if (args?.action === "bruteforce") return 600000;
-    }
-    return REQUEST_TIMEOUT;
+    if (request.method !== "tools/call") return TIMEOUT_MS.default;
+    const params = request.params as { name?: string; arguments?: Record<string, unknown> } | undefined;
+    if (!params?.name) return TIMEOUT_MS.default;
+    const action = params.arguments?.action as string | undefined;
+    if (action) return TIMEOUT_MS[`${params.name}:${action}`] ?? TIMEOUT_MS.default;
+    return TIMEOUT_MS.default;
 }
 
 let reloadWaitUntil = 0;
-const RELOAD_WAIT_MS = 3000;
+const RELOAD_SETTLE_MS = 4000;
 
 export function notifyReloadTriggered(): void {
-    reloadWaitUntil = Date.now() + RELOAD_WAIT_MS + 1000;
+    reloadWaitUntil = Date.now() + RELOAD_SETTLE_MS;
 }
 
 export function notifyRendererReady(): void {
-    if (reloadWaitUntil > 0) {
-        reloadWaitUntil = Date.now() + RELOAD_WAIT_MS;
-    }
-}
-
-function sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    if (reloadWaitUntil > 0) reloadWaitUntil = Date.now() + 3000;
 }
 
 let server: Server | null = null;
@@ -49,14 +73,14 @@ interface QueuedRequest {
 
 const requestQueue: QueuedRequest[] = [];
 const pendingRequests = new Map<number, (response: MCPResponse | null) => void>();
-const timeouts = new Map<number, ReturnType<typeof setTimeout>>();
+const pendingTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 const stats: ServerStats = { startedAt: 0, requests: 0, success: 0, errors: 0, timeouts: 0 };
 
-const PRIORITY_METHODS: Readonly<Record<string, number>> = {
-    "tools/call": 1,
-    "initialize": 2,
-    "tools/list": 3,
+const PRIORITY: Readonly<Record<string, number>> = {
+    initialize: 0,
+    "tools/list": 1,
+    "tools/call": 2,
 };
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -82,35 +106,45 @@ function readBody(req: IncomingMessage): Promise<string> {
             size += chunk.length;
             if (size > MAX_BODY_SIZE) {
                 req.destroy();
-                reject(new Error("Body too large"));
+                reject(new Error(`Request body exceeds ${MAX_BODY_SIZE} bytes`));
                 return;
             }
             chunks.push(chunk);
         });
-        req.on("end", () => {
-            resolve(chunks.length === 1 ? chunks[0].toString() : Buffer.concat(chunks, size).toString());
-        });
+        req.on("end", () => resolve(chunks.length === 1 ? chunks[0].toString() : Buffer.concat(chunks, size).toString()));
         req.on("error", reject);
     });
 }
 
-function writeResponse(res: ServerResponse, statusCode: number, json: string): void {
-    const body = Buffer.from(json);
+function writeJSON(res: ServerResponse, statusCode: number, body: string): void {
+    const buf = Buffer.from(body);
     res.writeHead(statusCode, {
         "Content-Type": "application/json",
-        "Content-Length": body.length,
+        "Content-Length": buf.length,
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
-        "Connection": "keep-alive",
+        Connection: "keep-alive",
     });
-    res.end(body);
+    res.end(buf);
 }
 
-function sendError(res: ServerResponse, id: number | string | null, code: number, message: string): void {
+function makeError(id: number | string | null, code: RPCError, message: string, data?: JSONValue): MCPResponse {
+    return { jsonrpc: "2.0", id, error: { code, message, ...(data != null ? { data } : {}) } };
+}
+
+function sendError(res: ServerResponse, id: number | string | null, code: RPCError, message: string, data?: JSONValue): void {
     stats.errors++;
-    const idStr = id === null ? "null" : typeof id === "string" ? `"${id}"` : id;
-    writeResponse(res, 200, `{"jsonrpc":"2.0","id":${idStr},"error":{"code":${code},"message":"${message}"}}`);
+    writeJSON(res, 200, JSON.stringify(makeError(id, code, message, data)));
+}
+
+function clearPending(reason: string): void {
+    const error = makeError(null, RPCError.InternalError, reason);
+    pendingRequests.forEach(resolve => resolve(error));
+    pendingRequests.clear();
+    pendingTimers.forEach(timer => clearTimeout(timer));
+    pendingTimers.clear();
+    requestQueue.length = 0;
 }
 
 export function getNextRequest(): { id: number; request: MCPRequest } | null {
@@ -127,29 +161,18 @@ export function getNextRequest(): { id: number; request: MCPRequest } | null {
 
 export function sendResponse(_event: Electron.IpcMainInvokeEvent, id: number, response: MCPResponse | null): void {
     const resolve = pendingRequests.get(id);
-    if (resolve) {
-        pendingRequests.delete(id);
-        const timeout = timeouts.get(id);
-        if (timeout) {
-            clearTimeout(timeout);
-            timeouts.delete(id);
-        }
-        resolve(response);
+    if (!resolve) return;
+    pendingRequests.delete(id);
+    const timer = pendingTimers.get(id);
+    if (timer) {
+        clearTimeout(timer);
+        pendingTimers.delete(id);
     }
-}
-
-function clearPendingRequests(errorMessage: string): void {
-    for (const resolve of pendingRequests.values()) {
-        resolve({ jsonrpc: "2.0", id: null, error: { code: -32603, message: errorMessage } });
-    }
-    pendingRequests.clear();
-    for (const t of timeouts.values()) clearTimeout(t);
-    timeouts.clear();
-    requestQueue.length = 0;
+    resolve(response);
 }
 
 export function startServer(): { ok: boolean; port: number } {
-    clearPendingRequests("Session reset");
+    clearPending("Server restarting");
 
     if (server) return { ok: true, port: PORT };
 
@@ -168,15 +191,15 @@ export function startServer(): { ok: boolean; port: number } {
         }
 
         if (req.method !== "POST") {
-            sendError(res, null, -32600, "Only POST method allowed");
+            sendError(res, null, RPCError.InvalidRequest, `Expected POST, got ${req.method}`);
             return;
         }
 
         let body: string;
         try {
             body = await readBody(req);
-        } catch {
-            sendError(res, null, -32700, "Failed to read body");
+        } catch (e) {
+            sendError(res, null, RPCError.ParseError, `Failed to read request body: ${e instanceof Error ? e.message : String(e)}`);
             return;
         }
 
@@ -184,36 +207,51 @@ export function startServer(): { ok: boolean; port: number } {
         try {
             request = JSON.parse(body) as MCPRequest;
         } catch {
-            sendError(res, null, -32700, "Invalid JSON");
+            sendError(res, null, RPCError.ParseError, "Request body is not valid JSON");
             return;
         }
 
         if (request.jsonrpc !== "2.0") {
-            sendError(res, request.id ?? null, -32600, "Must use JSON-RPC 2.0");
+            sendError(res, request.id ?? null, RPCError.InvalidRequest, `Expected jsonrpc "2.0", got "${request.jsonrpc}"`);
             return;
         }
 
         if (reloadWaitUntil > 0) {
-            const waitTime = reloadWaitUntil - Date.now();
-            if (waitTime > 0) {
-                await sleep(waitTime);
-            }
+            const remaining = reloadWaitUntil - Date.now();
+            if (remaining > 0) await new Promise<void>(r => setTimeout(r, remaining));
             reloadWaitUntil = 0;
         }
 
-        const id = requestId = (requestId + 1) & 0x7FFFFFFF;
-        const priority = PRIORITY_METHODS[request.method] ?? 10;
+        const id = (requestId = (requestId + 1) & 0x7fffffff);
+        const priority = PRIORITY[request.method] ?? 10;
+        const timeout = getRequestTimeout(request);
 
         const response = await new Promise<MCPResponse | null>(resolve => {
             pendingRequests.set(id, resolve);
-            timeouts.set(id, setTimeout(() => {
-                if (pendingRequests.has(id)) {
+
+            pendingTimers.set(
+                id,
+                setTimeout(() => {
+                    if (!pendingRequests.has(id)) return;
                     pendingRequests.delete(id);
-                    timeouts.delete(id);
+                    pendingTimers.delete(id);
                     stats.timeouts++;
-                    resolve({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "Timeout" } });
-                }
-            }, getRequestTimeout(request)));
+
+                    const params = request.params as { name?: string; arguments?: Record<string, unknown> } | undefined;
+                    const tool = params?.name ?? request.method;
+                    const action = params?.arguments?.action as string | undefined;
+                    const detail = action ? `${tool}:${action}` : tool;
+
+                    resolve(
+                        makeError(request.id, RPCError.Timeout, `${detail} did not respond within ${Math.round(timeout / 1000)}s. The renderer may be blocked or the operation is too expensive.`, {
+                            tool,
+                            action: action ?? null,
+                            timeoutMs: timeout,
+                        }),
+                    );
+                }, timeout),
+            );
+
             requestQueue.push({ id, request, priority });
         });
 
@@ -227,27 +265,29 @@ export function startServer(): { ok: boolean; port: number } {
         } else {
             if ("error" in response) stats.errors++;
             else stats.success++;
-            writeResponse(res, 200, JSON.stringify(response));
+            writeJSON(res, 200, JSON.stringify(response));
         }
     });
 
-    server.keepAliveTimeout = 10000;
-    server.headersTimeout = 5000;
+    server.keepAliveTimeout = 10_000;
+    server.headersTimeout = 5_000;
     server.maxHeadersCount = 20;
-    server.timeout = 35000;
+    server.timeout = 0;
 
     server.on("error", (err: NodeJS.ErrnoException) => {
-        console.error("[mcp]", err.code === "EADDRINUSE" ? `Port ${PORT} in use` : err.message);
+        console.error("[mcp]", err.code === "EADDRINUSE" ? `Port ${PORT} already in use` : err.message);
     });
 
-    server.on("listening", () => { stats.startedAt = Date.now(); });
+    server.on("listening", () => {
+        stats.startedAt = Date.now();
+    });
 
     server.listen(PORT, HOST);
     return { ok: true, port: PORT };
 }
 
 export function stopServer(): { ok: boolean } {
-    clearPendingRequests("Server stopped");
+    clearPending("Server stopped");
     server?.close();
     server = null;
     return { ok: true };
@@ -262,7 +302,7 @@ export function getServerStatus(): ServerStatus {
             ...stats,
             pendingRequests: pendingRequests.size,
             queuedRequests: requestQueue.length,
-            uptimeFormatted: uptime ? `${Math.floor(uptime / 60000)}m ${Math.floor((uptime % 60000) / 1000)}s` : null
-        }
+            uptimeFormatted: uptime ? `${Math.floor(uptime / 60000)}m ${Math.floor((uptime % 60000) / 1000)}s` : null,
+        },
     };
 }

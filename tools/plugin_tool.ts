@@ -7,7 +7,7 @@
 import { canonicalizeMatch } from "@utils/patches";
 
 import { PluginOption, PluginToolArgs, ToolResult, VencordPlugin } from "../types";
-import { plugins, pluginSettings, startPlugin, stopPlugin } from "../webpack";
+import { pluginSettings, plugins, startPlugin, stopPlugin } from "../webpack";
 import { LIMITS, OPTION_TYPE_NAMES } from "./constants";
 import { countModuleMatchesFast } from "./utils";
 
@@ -19,7 +19,9 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
     const findPlugin = (filter: string) => {
         const plugin = plugins[filter] as VencordPlugin | undefined;
         if (plugin) return { plugin, name: filter };
-        const similar = Object.keys(plugins).filter(n => n.toLowerCase().includes(filter.toLowerCase())).slice(0, LIMITS.PLUGIN.SUGGESTIONS);
+        const similar = Object.keys(plugins)
+            .filter(n => n.toLowerCase().includes(filter.toLowerCase()))
+            .slice(0, LIMITS.PLUGIN.SUGGESTIONS);
         return { error: true, message: `Plugin "${filter}" not found`, suggestions: similar.length ? similar : undefined };
     };
 
@@ -76,7 +78,7 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
                     description: o.description as string | undefined,
                     currentValue: currentSettings[key] ?? o.default,
                     default: o.default,
-                    options: o.options
+                    options: o.options,
                 };
             }
 
@@ -113,14 +115,15 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         if (showPatches && plugin.patches) {
             info.patches = plugin.patches.slice(0, LIMITS.PLUGIN.PATCHES_SLICE).map(p => ({
                 find: String(typeof p.find === "string" ? p.find : p.find).slice(0, LIMITS.PLUGIN.FIND_SLICE),
-                replacementCount: Array.isArray(p.replacement) ? p.replacement.length : 1
+                replacementCount: Array.isArray(p.replacement) ? p.replacement.length : 1,
             }));
         }
 
         if (validate && plugin.patches) {
-            let ok = 0, broken = 0;
+            let ok = 0,
+                broken = 0;
             for (const patch of plugin.patches) {
-                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
                 const count = countModuleMatchesFast(canonicalizeMatch(rawFind), 2);
                 if (count === 1) ok++;
                 else broken++;
@@ -128,7 +131,7 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
             info.health = {
                 ok,
                 broken,
-                status: broken === 0 ? "HEALTHY" : broken < plugin.patches.length / 2 ? "DEGRADED" : "BROKEN"
+                status: broken === 0 ? "HEALTHY" : broken < plugin.patches.length / 2 ? "DEGRADED" : "BROKEN",
             };
         }
 
@@ -140,6 +143,6 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         total: pluginList.length,
         enabled: enabledCount,
         plugins: pluginInfos,
-        note: pluginList.length > maxPlugins ? "Use name param to filter" : undefined
+        note: pluginList.length > maxPlugins ? "Use name param to filter" : undefined,
     };
 }

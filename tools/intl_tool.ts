@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { sleep } from "@utils/misc";
-
 import { IntlToolArgs, PatternData } from "../types";
 import { createIntlHashBracketRegex, createIntlHashDotRegex } from "./constants";
 import {
@@ -15,6 +13,7 @@ import {
     getIntlMessageFromHash,
     getLocaleMessages,
     getModuleSource,
+    getOrderedIntlHashes,
     KEY_MAP,
     runtimeHashMessageKey,
     searchModulesOptimized,
@@ -41,8 +40,10 @@ function buildPatternData(): PatternData {
     const parts = new Map<string, number>();
     const prefixes = new Map<string, number>();
     const prefixes2 = new Map<string, number>();
+    const prefixes3 = new Map<string, number>();
     const suffixes = new Map<string, number>();
     const suffixes2 = new Map<string, number>();
+    const suffixes3 = new Map<string, number>();
 
     for (const key of Object.values(KEY_MAP)) {
         const segs = key.split("_");
@@ -64,6 +65,10 @@ function buildPatternData(): PatternData {
             increment(prefixes2, segs.slice(0, 2).join("_"));
             increment(suffixes2, segs.slice(-2).join("_"));
         }
+        if (segs.length >= 4) {
+            increment(prefixes3, segs.slice(0, 3).join("_"));
+            increment(suffixes3, segs.slice(-3).join("_"));
+        }
     }
 
     const transitions = new Map<string, string[]>();
@@ -75,8 +80,10 @@ function buildPatternData(): PatternData {
         parts: sortByFrequency(parts, 1),
         prefixes: sortByFrequency(prefixes, 2),
         prefixes2: sortByFrequency(prefixes2, 2),
+        prefixes3: sortByFrequency(prefixes3, 2),
         suffixes: sortByFrequency(suffixes, 2),
         suffixes2: sortByFrequency(suffixes2, 2),
+        suffixes3: sortByFrequency(suffixes3, 2),
     };
 
     return patternCache;
@@ -107,56 +114,144 @@ function* yieldTransitionChain(start: string, transitions: Map<string, string[]>
 
 function* yieldCombinations(lists: string[][]): Generator<string> {
     if (!lists.length) return;
-    if (lists.length === 1) { for (const a of lists[0]) yield a; return; }
-    if (lists.length === 2) { for (const a of lists[0]) for (const b of lists[1]) yield `${a}_${b}`; return; }
+    if (lists.length === 1) {
+        for (const a of lists[0]) yield a;
+        return;
+    }
+    if (lists.length === 2) {
+        for (const a of lists[0]) for (const b of lists[1]) yield `${a}_${b}`;
+        return;
+    }
     for (const a of lists[0]) for (const b of lists[1]) for (const c of lists[2]) yield `${a}_${b}_${c}`;
 }
 
-function* generateCandidates(words: string[], patterns: PatternData): Generator<string> {
+function findNeighborKeys(hash: string): string[] {
+    const locale = getLocaleMessages();
+    if (!locale) return [];
+    const allHashes = Object.keys(locale);
+    const idx = allHashes.indexOf(hash);
+    if (idx === -1) return [];
+
+    const nearby = allHashes.slice(Math.max(0, idx - 8), idx + 9).filter(h => h !== hash);
+    const hashMap = buildIntlHashToKeyMap();
+    return nearby.map(h => hashMap.get(h)).filter((k): k is string => !!k);
+}
+
+function extractPrefixesFromKeys(keys: string[]): string[] {
+    const prefixCounts = new Map<string, number>();
+    for (const key of keys) {
+        const segs = key.split("_");
+        for (let len = 1; len <= Math.min(segs.length - 1, 4); len++) {
+            const prefix = segs.slice(0, len).join("_");
+            increment(prefixCounts, prefix);
+        }
+    }
+    return [...prefixCounts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length).map(([k]) => k);
+}
+
+function* generateCandidates(words: string[], patterns: PatternData, neighborKeys?: string[]): Generator<string> {
     if (!words.length) return;
 
     for (const word of words) yield word;
 
-    for (let i = 0; i < words.length; i++)
-        for (let j = i + 1; j <= Math.min(words.length, i + 4); j++)
-            yield words.slice(i, j).join("_");
+    for (let i = 0; i < words.length; i++) for (let j = i + 1; j <= Math.min(words.length, i + 4); j++) yield words.slice(i, j).join("_");
+
+    const cores = words.flatMap((_, i) => Array.from({ length: Math.min(words.length, i + 3) - i }, (__, j) => words.slice(i, i + j + 1).join("_")));
+
+    if (neighborKeys?.length) {
+        const contextPrefixes = extractPrefixesFromKeys(neighborKeys);
+
+        const contextSuffixes = new Set<string>();
+        for (const key of neighborKeys) {
+            const segs = key.split("_");
+            for (let len = 1; len <= Math.min(segs.length - 1, 4); len++) {
+                contextSuffixes.add(segs.slice(-len).join("_"));
+            }
+        }
+        const ctxSuffixes = [...contextSuffixes];
+
+        for (const prefix of contextPrefixes) {
+            for (const word of words) {
+                yield `${prefix}_${word}`;
+                for (const w2 of words) {
+                    if (w2 === word) continue;
+                    yield `${prefix}_${word}_${w2}`;
+                    yield `${prefix}_${w2}_${word}`;
+                }
+            }
+            for (const core of cores) {
+                yield `${prefix}_${core}`;
+            }
+            for (const suf of ctxSuffixes) {
+                yield `${prefix}_${suf}`;
+                for (const word of words) {
+                    yield `${prefix}_${word}_${suf}`;
+                    for (const w2 of words) {
+                        if (w2 === word) continue;
+                        yield `${prefix}_${word}_${w2}_${suf}`;
+                    }
+                }
+                for (const core of cores) {
+                    yield `${prefix}_${core}_${suf}`;
+                }
+            }
+
+            for (const part of patterns.parts.slice(0, 200)) {
+                yield `${prefix}_${part}`;
+                for (const suf of ctxSuffixes) {
+                    yield `${prefix}_${part}_${suf}`;
+                }
+                for (const word of words) {
+                    yield `${prefix}_${part}_${word}`;
+                    yield `${prefix}_${word}_${part}`;
+                    for (const suf of ctxSuffixes) {
+                        yield `${prefix}_${word}_${part}_${suf}`;
+                        yield `${prefix}_${part}_${word}_${suf}`;
+                    }
+                }
+            }
+        }
+    }
 
     for (const starter of patterns.starters) {
         yield starter;
         for (const word of words) {
             yield `${starter}_${word}`;
-            for (const chain of yieldTransitionChain(starter, patterns.transitions, 3, [30, 20, 10])) {
+            for (const chain of yieldTransitionChain(starter, patterns.transitions, 5, [30, 25, 20, 15, 10])) {
                 yield chain;
-                for (const w of words) { yield `${chain}_${w}`; yield `${w}_${chain}`; }
+                for (const w of words) {
+                    yield `${chain}_${w}`;
+                    yield `${w}_${chain}`;
+                }
             }
         }
     }
 
     for (const word of words) {
-        yield* yieldTransitionChain(word, patterns.transitions, 4, [60, 30, 15, 10]);
+        yield* yieldTransitionChain(word, patterns.transitions, 6, [60, 40, 25, 15, 10, 8]);
 
         for (const starter of patterns.starters) {
             if (!patterns.transitions.get(starter)?.includes(word)) continue;
             yield `${starter}_${word}`;
-            for (const chain of yieldTransitionChain(word, patterns.transitions, 2, [40, 20])) {
+            for (const chain of yieldTransitionChain(word, patterns.transitions, 4, [40, 25, 15, 10])) {
                 yield `${starter}_${chain}`;
             }
         }
     }
 
-    const cores = words.flatMap((_, i) =>
-        Array.from({ length: Math.min(words.length, i + 3) - i }, (__, j) => words.slice(i, i + j + 1).join("_"))
-    );
-
-    const prefixSuffixPairs: Array<[string[], string[], number]> = [
-        [patterns.prefixes.slice(0, 400), words, 0],
-        [patterns.prefixes2.slice(0, 300), words, 0],
-        [words, patterns.suffixes.slice(0, 300), 0],
-        [words, patterns.suffixes2.slice(0, 250), 0],
-        [patterns.prefixes.slice(0, 300), cores, 0],
-        [patterns.prefixes2.slice(0, 250), cores, 0],
-        [cores, patterns.suffixes.slice(0, 250), 0],
-        [cores, patterns.suffixes2.slice(0, 150), 0],
+    const prefixSuffixPairs: Array<[string[], string[]]> = [
+        [patterns.prefixes.slice(0, 400), words],
+        [patterns.prefixes2.slice(0, 300), words],
+        [patterns.prefixes3.slice(0, 200), words],
+        [words, patterns.suffixes.slice(0, 300)],
+        [words, patterns.suffixes2.slice(0, 250)],
+        [words, patterns.suffixes3.slice(0, 200)],
+        [patterns.prefixes.slice(0, 300), cores],
+        [patterns.prefixes2.slice(0, 250), cores],
+        [patterns.prefixes3.slice(0, 200), cores],
+        [cores, patterns.suffixes.slice(0, 250)],
+        [cores, patterns.suffixes2.slice(0, 150)],
+        [cores, patterns.suffixes3.slice(0, 120)],
     ];
 
     for (const [a, b] of prefixSuffixPairs) yield* yieldCombinations([a, b]);
@@ -164,17 +259,75 @@ function* generateCandidates(words: string[], patterns: PatternData): Generator<
     const tripleSpecs: Array<[string[], string[], string[]]> = [
         [patterns.prefixes.slice(0, 200), words, patterns.suffixes.slice(0, 150)],
         [patterns.prefixes2.slice(0, 150), words, patterns.suffixes.slice(0, 120)],
+        [patterns.prefixes2.slice(0, 150), words, patterns.suffixes2.slice(0, 100)],
+        [patterns.prefixes3.slice(0, 120), words, patterns.suffixes.slice(0, 100)],
+        [patterns.prefixes3.slice(0, 100), words, patterns.suffixes2.slice(0, 80)],
+        [patterns.prefixes3.slice(0, 80), words, patterns.suffixes3.slice(0, 60)],
         [patterns.prefixes.slice(0, 150), words, patterns.suffixes2.slice(0, 120)],
+        [patterns.prefixes.slice(0, 120), words, patterns.suffixes3.slice(0, 100)],
         [patterns.prefixes.slice(0, 120), cores, patterns.suffixes.slice(0, 100)],
+        [patterns.prefixes2.slice(0, 100), cores, patterns.suffixes2.slice(0, 80)],
+        [patterns.prefixes3.slice(0, 80), cores, patterns.suffixes3.slice(0, 60)],
     ];
 
     for (const [a, b, c] of tripleSpecs) yield* yieldCombinations([a, b, c]);
 
-    for (const part of patterns.parts.slice(0, 120)) {
+    for (const part of patterns.parts.slice(0, 200)) {
         for (const word of words) {
             if (part === word) continue;
             yield `${part}_${word}`;
             yield `${word}_${part}`;
+        }
+    }
+}
+
+function* generateCandidatesFast(words: string[], patterns: PatternData, neighborKeys?: string[]): Generator<string> {
+    if (!words.length) return;
+
+    for (const word of words) yield word;
+
+    for (let i = 0; i < words.length; i++) for (let j = i + 1; j <= Math.min(words.length, i + 4); j++) yield words.slice(i, j).join("_");
+
+    const cores = words.flatMap((_, i) => Array.from({ length: Math.min(words.length, i + 3) - i }, (__, j) => words.slice(i, i + j + 1).join("_")));
+
+    if (neighborKeys?.length) {
+        const contextPrefixes = extractPrefixesFromKeys(neighborKeys).slice(0, 30);
+        const contextSuffixes = new Set<string>();
+        for (const key of neighborKeys) {
+            const segs = key.split("_");
+            for (let len = 1; len <= Math.min(segs.length - 1, 3); len++) contextSuffixes.add(segs.slice(-len).join("_"));
+        }
+
+        for (const prefix of contextPrefixes) {
+            for (const word of words) {
+                yield `${prefix}_${word}`;
+                for (const w2 of words) {
+                    if (w2 !== word) yield `${prefix}_${word}_${w2}`;
+                }
+            }
+            for (const core of cores) yield `${prefix}_${core}`;
+            for (const suf of contextSuffixes) {
+                yield `${prefix}_${suf}`;
+                for (const word of words) yield `${prefix}_${word}_${suf}`;
+                for (const core of cores) yield `${prefix}_${core}_${suf}`;
+            }
+        }
+    }
+
+    for (const [a, b] of [
+        [patterns.prefixes.slice(0, 60), words],
+        [patterns.prefixes2.slice(0, 40), words],
+        [words, patterns.suffixes.slice(0, 60)],
+        [words, patterns.suffixes2.slice(0, 40)],
+    ] as Array<[string[], string[]]>)
+        yield* yieldCombinations([a, b]);
+
+    for (const part of patterns.parts.slice(0, 50)) {
+        for (const word of words) {
+            if (part !== word) {
+                yield `${part}_${word}`;
+                yield `${word}_${part}`;
+            }
         }
     }
 }
@@ -206,7 +359,10 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
     if (action === "search" || (query && !action)) {
         if (!query) return { error: true, message: "query required" };
 
-        const searchTerms = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
+        const searchTerms = query
+            .toLowerCase()
+            .split(/\s+/)
+            .filter(w => w.length >= 2);
         const queryLower = query.toLowerCase();
         const locale = getLocaleMessages();
         if (!locale) return { query, count: 0, matches: [] };
@@ -220,15 +376,13 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
             if (!text) continue;
 
             const lower = text.toLowerCase();
-            const isMatch = searchTerms.length > 1
-                ? searchTerms.every(term => lower.includes(term))
-                : lower.includes(queryLower);
+            const isMatch = searchTerms.length > 1 ? searchTerms.every(term => lower.includes(term)) : lower.includes(queryLower);
 
             if (!isMatch) continue;
 
             const entry: { hash: string; message: string; key?: string; find?: string } = {
                 hash: h,
-                message: text.slice(0, 200)
+                message: text.slice(0, 200),
             };
             const known = hashMap.get(h);
             if (known) {
@@ -248,16 +402,11 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
         const source = getModuleSource(moduleId);
         if (!source) return { error: true, message: `module ${moduleId} not found` };
 
-        const hashPatterns = [
-            createIntlHashDotRegex(),
-            createIntlHashBracketRegex(),
-            /intl\.string\(\w+\.t\.([A-Za-z0-9+/]{6})\)/g,
-            /"([A-Za-z0-9+/]{6})":\s*\[/g
-        ];
+        const hashPatterns = [createIntlHashDotRegex(), createIntlHashBracketRegex(), /intl\.string\(\w+\.t\.([A-Za-z0-9+/]{6})\)/g, /"([A-Za-z0-9+/]{6})":\s*\[/g];
 
         const found = new Set<string>();
         for (const regex of hashPatterns) {
-            let match;
+            let match: RegExpExecArray | null;
             while ((match = regex.exec(source))) {
                 if (match[1].length === 6) found.add(match[1]);
             }
@@ -279,53 +428,189 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
             key,
             hash: h,
             message: getMessage(h),
-            modules: searchModulesOptimized(src => src.includes(dotUsage) || src.includes(bracketUsage), limit)
+            modules: searchModulesOptimized(src => src.includes(dotUsage) || src.includes(bracketUsage), limit),
         };
     }
 
     if (action === "bruteforce") {
-        if (!hash) return { error: true, message: "hash required" };
+        const SINGLE_DEADLINE_MS = 120_000;
+        const BATCH_DEADLINE_MS = 30_000;
+        const BURST_MS = 30;
 
-        const msg = getMessage(hash);
-        let tested = 0;
+        const yieldFrame = () => new Promise<void>(r => setTimeout(r, 0));
 
-        for (const k of Object.values(KEY_MAP)) {
-            tested++;
-            if (runtimeHashMessageKey(k) === hash) {
-                return { hash, message: msg?.slice(0, 100), found: k, find: `#{intl::${k}}`, tested, source: "keymap" };
-            }
-        }
+        if (hash) {
+            const msg = getMessage(hash);
+            let tested = 0;
 
-        const pluginKey = buildIntlHashToKeyMap().get(hash);
-        if (pluginKey) {
-            return { hash, message: msg?.slice(0, 100), found: pluginKey, find: `#{intl::${pluginKey}}`, tested, source: "plugins" };
-        }
-
-        if (msg) {
-            const words = extractWords(msg);
-            const patterns = buildPatternData();
-            const seen = new Set<string>();
-            let ops = 0;
-
-            for (const candidate of generateCandidates(words, patterns)) {
-                if (candidate.length < 2 || candidate.length > 80 || seen.has(candidate)) continue;
-
-                seen.add(candidate);
+            for (const k of Object.values(KEY_MAP)) {
                 tested++;
-                ops++;
+                if (runtimeHashMessageKey(k) === hash) {
+                    return { hash, message: msg?.slice(0, 100), found: k, find: `#{intl::${k}}`, tested, source: "keymap" };
+                }
+            }
 
-                if (ops >= 1000) {
-                    ops = 0;
-                    await sleep(0);
+            const pluginKey = buildIntlHashToKeyMap().get(hash);
+            if (pluginKey) {
+                return { hash, message: msg?.slice(0, 100), found: pluginKey, find: `#{intl::${pluginKey}}`, tested, source: "plugins" };
+            }
+
+            if (msg) {
+                const words = extractWords(msg);
+                const patterns = buildPatternData();
+                const neighborKeys = findNeighborKeys(hash);
+                const seen = new Set<string>();
+                const deadline = Date.now() + SINGLE_DEADLINE_MS;
+                let exhausted = true;
+                let burstEnd = Date.now() + BURST_MS;
+
+                for (const candidate of generateCandidates(words, patterns, neighborKeys)) {
+                    if (candidate.length < 2 || candidate.length > 80 || seen.has(candidate)) continue;
+
+                    seen.add(candidate);
+                    tested++;
+
+                    if (runtimeHashMessageKey(candidate) === hash) {
+                        return { hash, message: msg.slice(0, 100), found: candidate, find: `#{intl::${candidate}}`, tested, source: "generated", neighborContext: neighborKeys.slice(0, 5) };
+                    }
+
+                    if (Date.now() > burstEnd) {
+                        if (Date.now() > deadline) {
+                            exhausted = false;
+                            break;
+                        }
+                        await yieldFrame();
+                        burstEnd = Date.now() + BURST_MS;
+                    }
                 }
 
-                if (runtimeHashMessageKey(candidate) === hash) {
-                    return { hash, message: msg.slice(0, 100), found: candidate, find: `#{intl::${candidate}}`, tested, source: "generated" };
+                return {
+                    hash,
+                    message: msg.slice(0, 100),
+                    found: null,
+                    raw: `#{intl::${hash}::raw}`,
+                    tested,
+                    exhausted,
+                    neighborContext: neighborKeys.slice(0, 8),
+                    hint: exhausted
+                        ? "All generated candidates exhausted. Use test action with custom candidates based on the neighborContext keys above."
+                        : `Stopped after ${Math.round(SINGLE_DEADLINE_MS / 1000)}s (${tested} candidates tested). Use test action with targeted candidates based on the neighborContext keys above.`,
+                };
+            }
+
+            return {
+                hash,
+                message: msg?.slice(0, 100),
+                found: null,
+                raw: `#{intl::${hash}::raw}`,
+                tested: 0,
+                hint: "Hash has no message text, cannot generate candidates. Use test action with custom candidates.",
+            };
+        }
+
+        const locale = getLocaleMessages();
+        if (!locale) return { error: true, message: "Could not find intl definitions module" };
+
+        const hashMap = buildIntlHashToKeyMap();
+        const allHashes = Object.keys(locale).filter(k => k !== "default" && k !== "__esModule");
+        const unknownHashes = new Set<string>();
+        const unknownEntries: Array<{ hash: string; msg: string }> = [];
+
+        for (const h of allHashes) {
+            if (hashMap.has(h)) continue;
+            const msg = extractIntlText(locale[h]);
+            if (!msg || msg.length < 4) continue;
+            unknownHashes.add(h);
+            unknownEntries.push({ hash: h, msg });
+        }
+
+        const totalUnknown = unknownHashes.size;
+        if (!totalUnknown) return { total: allHashes.length, found: [], foundCount: 0, unknownCount: 0, message: "All hashes are already known" };
+
+        const found: Array<{ hash: string; key: string; message: string }> = [];
+        const seen = new Set<string>(Object.values(KEY_MAP));
+        let tested = 0;
+        let exhausted = true;
+        const deadline = Date.now() + BATCH_DEADLINE_MS;
+        let burstEnd = Date.now() + BURST_MS;
+
+        const unknownMap = new Map(unknownEntries.map(e => [e.hash, e.msg]));
+
+        const tryCandidate = (candidate: string) => {
+            if (candidate.length < 2 || candidate.length > 80 || seen.has(candidate)) return;
+            seen.add(candidate);
+            tested++;
+            const h = runtimeHashMessageKey(candidate);
+            if (unknownHashes.has(h)) {
+                found.push({ hash: h, key: candidate, message: (unknownMap.get(h) ?? "").slice(0, 120) });
+                unknownHashes.delete(h);
+                unknownMap.delete(h);
+            }
+        };
+        const patterns = buildPatternData();
+
+        for (const { hash: h, msg } of unknownEntries) {
+            if (!unknownHashes.has(h)) continue;
+            const words = extractWords(msg);
+            const neighborKeys = findNeighborKeys(h);
+
+            for (const candidate of generateCandidatesFast(words, patterns, neighborKeys)) {
+                tryCandidate(candidate);
+                if (Date.now() > burstEnd) {
+                    if (Date.now() > deadline) {
+                        exhausted = false;
+                        break;
+                    }
+                    await yieldFrame();
+                    burstEnd = Date.now() + BURST_MS;
+                }
+            }
+            if (!exhausted || !unknownHashes.size) break;
+        }
+
+        if (!found.length) return { total: allHashes.length, tested, foundCount: 0, initialUnknown: totalUnknown, remainingUnknown: unknownHashes.size, exhausted };
+
+        const orderedHashes = getOrderedIntlHashes();
+        if (orderedHashes) {
+            const posMap = new Map(orderedHashes.map((h, i) => [h, i]));
+            found.sort((a, b) => (posMap.get(a.hash) ?? Infinity) - (posMap.get(b.hash) ?? Infinity));
+
+            const knownSet = new Set(Object.keys(KEY_MAP));
+            for (const entry of found) {
+                const pos = posMap.get(entry.hash);
+                if (pos == null) continue;
+                for (let i = pos - 1; i >= 0; i--) {
+                    if (knownSet.has(orderedHashes[i])) {
+                        (entry as Record<string, unknown>).afterHash = orderedHashes[i];
+                        (entry as Record<string, unknown>).afterKey = KEY_MAP[orderedHashes[i]];
+                        break;
+                    }
                 }
             }
         }
 
-        return { hash, message: msg?.slice(0, 100), found: null, raw: `#{intl::${hash}::raw}`, tested, hint: "use test action with custom candidates" };
+        return { total: allHashes.length, tested, foundCount: found.length, initialUnknown: totalUnknown, remainingUnknown: unknownHashes.size, exhausted, results: found };
+    }
+
+    if (action === "unknown") {
+        const locale = getLocaleMessages();
+        if (!locale) return { error: true, message: "Could not find intl definitions module" };
+
+        const hashMap = buildIntlHashToKeyMap();
+        const allHashes = Object.keys(locale).filter(k => k !== "default" && k !== "__esModule");
+        const unknown: Array<{ hash: string; message: string }> = [];
+        const filterQuery = query?.toLowerCase();
+
+        for (const h of allHashes) {
+            if (hashMap.has(h)) continue;
+            const msg = extractIntlText(locale[h]);
+            if (!msg || msg.length < 2) continue;
+            if (filterQuery && !msg.toLowerCase().includes(filterQuery)) continue;
+            unknown.push({ hash: h, message: msg.slice(0, 120) });
+        }
+
+        unknown.sort((a, b) => a.message.length - b.message.length);
+        return { total: allHashes.length, known: allHashes.length - unknown.length, unknownCount: unknown.length, unknown: unknown.slice(0, limit) };
     }
 
     if (action === "test") {
@@ -401,5 +686,5 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
         return { tested, found, notFound };
     }
 
-    return { error: true, message: "action: hash, reverse, search, scan, targets, bruteforce, test" };
+    return { error: true, message: "action: hash, reverse, search, scan, targets, bruteforce, test, unknown" };
 }

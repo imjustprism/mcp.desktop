@@ -9,14 +9,7 @@ import { canonicalizeMatch } from "@utils/patches";
 import { FinderResult, FinderSpec, PatchToolArgs, VencordPlugin } from "../types";
 import { filters, findAll, findStore, plugins } from "../webpack";
 import { createIntlKeyPatternRegex, FORBIDDEN_PATCH_PATTERNS, MINIFIED_VARS_PATTERN } from "./constants";
-import {
-    batchCountModuleMatches,
-    getModuleSource,
-    intlHashExistsInDefinitions,
-    parseRegex,
-    runtimeHashMessageKey,
-    searchModulesOptimized,
-} from "./utils";
+import { batchCountModuleMatches, getModuleSource, intlHashExistsInDefinitions, parseRegex, runtimeHashMessageKey, searchModulesOptimized } from "./utils";
 
 const intlKeyPattern = createIntlKeyPatternRegex();
 
@@ -36,7 +29,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             count,
             unique: count === 1,
             moduleIds: moduleIds.slice(0, 10),
-            valid: count === 1 ? "Unique" : count === 0 ? "No matches" : `${count} modules, not unique`
+            valid: count === 1 ? "Unique" : count === 0 ? "No matches" : `${count} modules, not unique`,
         };
     }
 
@@ -46,7 +39,9 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
         const plugin = plugins[pluginName] as VencordPlugin | undefined;
 
         if (!plugin) {
-            const similar = Object.keys(plugins).filter(n => n.toLowerCase().includes(pluginName.toLowerCase())).slice(0, 5);
+            const similar = Object.keys(plugins)
+                .filter(n => n.toLowerCase().includes(pluginName.toLowerCase()))
+                .slice(0, 5);
             return { error: true, message: `Plugin "${pluginName}" not found`, suggestions: similar.length ? similar : undefined };
         }
 
@@ -54,10 +49,12 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             return { name: pluginName, enabled: plugin.started ?? false, patchCount: 0 };
         }
 
-        let ok = 0, broken = 0, ambiguous = 0;
+        let ok = 0,
+            broken = 0,
+            ambiguous = 0;
 
         const patchDetails = plugin.patches.map((patch, index) => {
-            const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+            const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
             const canonFind = canonicalizeMatch(rawFind);
             const matchingModules = searchModulesOptimized(src => src.includes(canonFind), 5);
             const moduleCount = matchingModules.length;
@@ -70,7 +67,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             const replacements = Array.isArray(patch.replacement) ? patch.replacement : [patch.replacement];
             const replacementInfo = replacements.map(r => ({
                 match: r.match?.toString().slice(0, 150),
-                replace: typeof r.replace === "string" ? r.replace.slice(0, 100) : "[function]"
+                replace: typeof r.replace === "string" ? r.replace.slice(0, 100) : "[function]",
             }));
 
             const info: Record<string, unknown> = { index, find: rawFind.slice(0, 200), status, moduleCount, replacements: replacementInfo };
@@ -98,7 +95,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             patchCount: plugin.patches.length,
             summary: { ok, broken, ambiguous },
             health: broken === 0 ? "HEALTHY" : broken < plugin.patches.length / 2 ? "DEGRADED" : "BROKEN",
-            patches: patchDetails
+            patches: patchDetails,
         };
     }
 
@@ -135,7 +132,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
                 const patch = plugin.patches[i];
                 stats.totalPatches++;
 
-                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
                 const intlMatch = rawFind.match(intlKeyPattern);
                 patchInfos.push({ plugin: nm, enabled, patchIndex: i, rawFind, canonFind: canonicalizeMatch(rawFind), intlKey: intlMatch?.[1] });
             }
@@ -152,7 +149,16 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             if (moduleCount === 0) {
                 stats.noMatch++;
                 if (showNoMatch) {
-                    const issue: typeof issues[0] = { plugin: nm, enabled: enabled ? true : undefined, patchIndex: i, find: displayFind, issue: "NO_MATCH", severity: "error", moduleCount: 0, details: "Find matches no modules" };
+                    const issue: (typeof issues)[0] = {
+                        plugin: nm,
+                        enabled: enabled ? true : undefined,
+                        patchIndex: i,
+                        find: displayFind,
+                        issue: "NO_MATCH",
+                        severity: "error",
+                        moduleCount: 0,
+                        details: "Find matches no modules",
+                    };
 
                     if (usesIntl && canonFind !== rawFind) {
                         issue.canonicalizedFind = canonFind.slice(0, 100);
@@ -169,14 +175,23 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             } else if (moduleCount > 1) {
                 stats.multiMatch++;
                 if (showMultiMatch) {
-                    const issue: typeof issues[0] = { plugin: nm, enabled: enabled ? true : undefined, patchIndex: i, find: displayFind, issue: "MULTIPLE_MATCH", severity: "warning", moduleCount, details: `Matches ${moduleCount}+ modules` };
+                    const issue: (typeof issues)[0] = {
+                        plugin: nm,
+                        enabled: enabled ? true : undefined,
+                        patchIndex: i,
+                        find: displayFind,
+                        issue: "MULTIPLE_MATCH",
+                        severity: "warning",
+                        moduleCount,
+                        details: `Matches ${moduleCount}+ modules`,
+                    };
                     if (usesIntl && canonFind !== rawFind) issue.canonicalizedFind = canonFind.slice(0, 100);
                     issues.push(issue);
                 }
             } else {
                 stats.validPatches++;
                 if (showValid) {
-                    const issue: typeof issues[0] = { plugin: nm, enabled: enabled ? true : undefined, patchIndex: i, find: displayFind, issue: "OK", severity: "info", moduleCount: 1 };
+                    const issue: (typeof issues)[0] = { plugin: nm, enabled: enabled ? true : undefined, patchIndex: i, find: displayFind, issue: "OK", severity: "info", moduleCount: 1 };
                     if (usesIntl && canonFind !== rawFind) issue.canonicalizedFind = canonFind.slice(0, 100);
                     issues.push(issue);
                 }
@@ -197,11 +212,26 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             const anchors: string[] = [];
             let score = 5;
 
-            if (pattern.includes("#{intl::")) { anchors.push("intl"); score += 3; }
-            if (/"[^"]{3,}"/.test(pattern) || /'[^']{3,}'/.test(pattern)) { anchors.push("string-literal"); score += 2; }
-            if (/[A-Za-z_$][\w$]*:/.test(pattern)) { anchors.push("prop-name"); score += 2; }
-            if (pattern.includes("\\i")) { anchors.push("identifier"); score += 1; }
-            if (/\(\?<=/.test(pattern)) { anchors.push("lookbehind"); score += 1; }
+            if (pattern.includes("#{intl::")) {
+                anchors.push("intl");
+                score += 3;
+            }
+            if (/"[^"]{3,}"/.test(pattern) || /'[^']{3,}'/.test(pattern)) {
+                anchors.push("string-literal");
+                score += 2;
+            }
+            if (/[A-Za-z_$][\w$]*:/.test(pattern)) {
+                anchors.push("prop-name");
+                score += 2;
+            }
+            if (pattern.includes("\\i")) {
+                anchors.push("identifier");
+                score += 1;
+            }
+            if (/\(\?<=/.test(pattern)) {
+                anchors.push("lookbehind");
+                score += 1;
+            }
 
             const minifiedMatches = pattern.match(MINIFIED_VARS_PATTERN);
             if (minifiedMatches && !pattern.includes("\\i")) {
@@ -231,14 +261,23 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
                 score -= 1;
             }
 
-            if (pattern.length > 200) { warnings.push("> 200 chars, shorten"); score -= 1; }
+            if (pattern.length > 200) {
+                warnings.push("> 200 chars, shorten");
+                score -= 1;
+            }
 
             let captures = 0;
             for (let i = 0; i < pattern.length - 1; i++) {
                 if (pattern[i] === "(" && pattern[i + 1] !== "?") captures++;
             }
-            if (captures > 3) { warnings.push(`${captures} captures, max 3`); score -= 1; }
-            if (!anchors.length) { warnings.push("No strong anchors detected"); score -= 1; }
+            if (captures > 3) {
+                warnings.push(`${captures} captures, max 3`);
+                score -= 1;
+            }
+            if (!anchors.length) {
+                warnings.push("No strong anchors detected");
+                score -= 1;
+            }
 
             return { score: Math.max(1, Math.min(10, score)), anchors, warnings, errors };
         };
@@ -266,7 +305,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             overallScore,
             verdict: allErrors.length ? "BROKEN" : overallScore >= 7 ? "GOOD" : overallScore >= 4 ? "ACCEPTABLE" : "NEEDS_WORK",
             allWarnings: allWarnings.length ? allWarnings : undefined,
-            allErrors: allErrors.length ? allErrors : undefined
+            allErrors: allErrors.length ? allErrors : undefined,
         };
     }
 
@@ -275,7 +314,8 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
         if (!specs?.length) return { error: true, message: "finders array required" };
 
         const results: FinderResult[] = [];
-        let found = 0, broken = 0;
+        let found = 0,
+            broken = 0;
 
         for (const spec of specs.slice(0, 100)) {
             const result = validateFinder(spec);
@@ -290,7 +330,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             broken,
             health: broken === 0 ? "HEALTHY" : broken < results.length / 2 ? "DEGRADED" : "BROKEN",
             results: results.filter(r => !r.found || args.showValid).slice(0, 100),
-            allResults: args.showValid ? undefined : `${found} valid finders hidden, use showValid to include`
+            allResults: args.showValid ? undefined : `${found} valid finders hidden, use showValid to include`,
         };
     }
 
@@ -306,7 +346,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
         const results: Array<Record<string, unknown>> = [];
 
         for (const [patchIdx, patch] of plugin.patches.entries()) {
-            const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+            const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
             const canonFind = canonicalizeMatch(rawFind);
             const moduleId = searchModulesOptimized(src => src.includes(canonFind), 2)[0];
             if (!moduleId) {
@@ -375,8 +415,11 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
 
         const benchOne = (label: string, matchStr: string, replaceStr: string) => {
             let regex: RegExp;
-            try { regex = buildRegex(matchStr); }
-            catch { return { label, error: "Invalid regex" }; }
+            try {
+                regex = buildRegex(matchStr);
+            } catch {
+                return { label, error: "Invalid regex" };
+            }
 
             const matchResult = source.match(regex);
             if (!matchResult) return { label, error: "Match failed", match: matchStr };
@@ -430,7 +473,9 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             const resultA = source.replace(regexA, replaceA);
             const resultB = source.replace(regexB, replaceB);
             equivalent = resultA === resultB;
-        } catch { /* */ }
+        } catch {
+            /* */
+        }
 
         return { find: findStr, moduleId, moduleSize: source.length, iterations: iters, rounds: numRounds, a, b, winner, speedup, equivalent };
     }
@@ -445,7 +490,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
             if (!plugin.patches?.length) continue;
 
             for (const [patchIdx, patch] of plugin.patches.entries()) {
-                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
                 const canonFind = canonicalizeMatch(rawFind);
                 const moduleId = searchModulesOptimized(src => src.includes(canonFind), 2)[0];
                 if (!moduleId) continue;
@@ -467,7 +512,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
                     const start = performance.now();
                     for (let i = 0; i < iters; i++) source.replace(regex, replaceStr);
                     const elapsed = performance.now() - start;
-                    const medianUs = +(elapsed / iters * 1000).toFixed(2);
+                    const medianUs = +((elapsed / iters) * 1000).toFixed(2);
 
                     allResults.push({
                         plugin: nm,
@@ -501,7 +546,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
         for (const [nm, plugin] of Object.entries(plugins) as [string, VencordPlugin][]) {
             if (!plugin.patches?.length) continue;
             for (const [patchIdx, patch] of plugin.patches.entries()) {
-                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
                 const canonFind = canonicalizeMatch(rawFind);
                 const moduleIds = searchModulesOptimized(src => src.includes(canonFind), 2);
                 for (const mid of moduleIds) {
@@ -537,7 +582,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
         for (const [nm, plugin] of Object.entries(plugins) as [string, VencordPlugin][]) {
             if (!plugin.patches?.length) continue;
             for (const patch of plugin.patches) {
-                const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+                const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
                 const canonFind = canonicalizeMatch(rawFind);
                 if (!source.includes(canonFind)) continue;
 
@@ -569,7 +614,7 @@ export async function handlePatchTool(args: PatchToolArgs): Promise<unknown> {
         const unconsumed = (Vencord.WebpackPatcher as { patches: Array<{ plugin: string; find: string | RegExp; all: boolean; replacement: unknown }> }).patches.filter(p => !p.all);
 
         const results = unconsumed.map(patch => {
-            const rawFind = typeof patch.find === "string" ? patch.find : patch.find?.toString() ?? "";
+            const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
             const canonFind = canonicalizeMatch(rawFind);
             const moduleCount = searchModulesOptimized(src => src.includes(canonFind), 5).length;
             const usesIntl = rawFind.includes("#{intl::");

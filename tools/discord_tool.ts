@@ -7,7 +7,18 @@
 import { ChannelStore, GuildStore, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
 
 import { DiscordAPIError, DiscordToolArgs, ToolResult } from "../types";
-import { DesignTokensModule, DiscordConstants, Endpoints, ExperimentStore, findAll, GatewayConnectionStore, getCommonModules, getSnowflakeUtils, IconUtilsModule, PlatformUtilsModule } from "../webpack";
+import {
+    DesignTokensModule,
+    DiscordConstants,
+    Endpoints,
+    ExperimentStore,
+    findAll,
+    GatewayConnectionStore,
+    getCommonModules,
+    getSnowflakeUtils,
+    IconUtilsModule,
+    PlatformUtilsModule,
+} from "../webpack";
 import { LIMITS } from "./constants";
 import { serializeResult } from "./utils";
 
@@ -22,9 +33,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
 
         try {
             const response = await apiCall({ url: endpoint, body });
-            const respBody = typeof response.body === "object" && response.body !== null
-                ? serializeResult(response.body, LIMITS.DISCORD.API_SERIALIZE)
-                : response.body;
+            const respBody = typeof response.body === "object" && response.body !== null ? serializeResult(response.body, LIMITS.DISCORD.API_SERIALIZE) : response.body;
             return { status: response.status, body: respBody };
         } catch (e) {
             const err = e as DiscordAPIError;
@@ -46,9 +55,9 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
                 date: date.toISOString(),
                 unix: Math.floor(timestamp / 1000),
                 age: `${Math.floor((Date.now() - timestamp) / 86400000)} days ago`,
-                workerId: Number((BigInt(id) & 0x3E0000n) >> 17n),
-                processId: Number((BigInt(id) & 0x1F000n) >> 12n),
-                increment: Number(BigInt(id) & 0xFFFn)
+                workerId: Number((BigInt(id) & 0x3e0000n) >> 17n),
+                processId: Number((BigInt(id) & 0x1f000n) >> 12n),
+                increment: Number(BigInt(id) & 0xfffn),
             };
         } catch {
             return { error: true, message: "Invalid snowflake ID" };
@@ -69,8 +78,12 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
         return {
             found: true,
             count: entries.length,
-            endpoints: Object.fromEntries(entries.slice(0, maxEndpoints).map(([k, v]) => [k, typeof v === "function" ? (v as (id1: string, id2: string) => string)("ID1", "ID2").slice(0, LIMITS.DISCORD.ENDPOINT_VALUE_SLICE) : v])),
-            note: entries.length > maxEndpoints ? "Use filter to narrow" : undefined
+            endpoints: Object.fromEntries(
+                entries
+                    .slice(0, maxEndpoints)
+                    .map(([k, v]) => [k, typeof v === "function" ? (v as (id1: string, id2: string) => string)("ID1", "ID2").slice(0, LIMITS.DISCORD.ENDPOINT_VALUE_SLICE) : v]),
+            ),
+            note: entries.length > maxEndpoints ? "Use filter to narrow" : undefined,
         };
     }
 
@@ -85,8 +98,11 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
 
         return {
             count: keys.length,
-            modules: keys.sort().slice(0, LIMITS.DISCORD.COMMON_MODULES_SLICE).map(k => ({ name: k, type: typeof common[k] })),
-            note: keys.length > LIMITS.DISCORD.COMMON_MODULES_SLICE ? "Use filter to narrow" : undefined
+            modules: keys
+                .sort()
+                .slice(0, LIMITS.DISCORD.COMMON_MODULES_SLICE)
+                .map(k => ({ name: k, type: typeof common[k] })),
+            note: keys.length > LIMITS.DISCORD.COMMON_MODULES_SLICE ? "Use filter to narrow" : undefined,
         };
     }
 
@@ -104,7 +120,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             matches: mods.slice(0, LIMITS.DISCORD.ENUM_MATCHES).map(mod => {
                 const keys = Object.keys(mod as object).filter(k => typeof (mod as Record<string, unknown>)[k] === "number" || typeof (mod as Record<string, unknown>)[k] === "string");
                 return { keys: keys.slice(0, LIMITS.DISCORD.ENUM_KEYS), sample: Object.fromEntries(keys.slice(0, LIMITS.DISCORD.ENUM_SAMPLE).map(k => [k, (mod as Record<string, unknown>)[k]])) };
-            })
+            }),
         };
     }
 
@@ -119,7 +135,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             totalJSHeapSizeMB: Math.round(memory.totalJSHeapSize / 1024 / 1024),
             jsHeapSizeLimit: memory.jsHeapSizeLimit,
             jsHeapSizeLimitMB: Math.round(memory.jsHeapSizeLimit / 1024 / 1024),
-            usagePercent: Math.round((memory.usedJSHeapSize / memory.jsHeapSizeLimit) * 100)
+            usagePercent: Math.round((memory.usedJSHeapSize / memory.jsHeapSizeLimit) * 100),
         };
     }
 
@@ -134,7 +150,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             total: resources.length,
             byType: {} as Record<string, number>,
             totalSize: 0,
-            slowest: [] as Array<{ name: string; duration: number }>
+            slowest: [] as Array<{ name: string; duration: number }>,
         };
 
         for (const r of resources) {
@@ -176,11 +192,11 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             heartbeat: {
                 interval: socket.heartbeatInterval,
                 lastAck: socket.heartbeatAck,
-                latency: socket.lastHeartbeatAckTime && socket.lastHeartbeatTime ? socket.lastHeartbeatAckTime - socket.lastHeartbeatTime : null
+                latency: socket.lastHeartbeatAckTime && socket.lastHeartbeatTime ? socket.lastHeartbeatAckTime - socket.lastHeartbeatTime : null,
             },
             uptime: socket.connectionStartTime ? Math.round((now - socket.connectionStartTime) / 1000) : null,
             identifyCount: socket.identifyCount,
-            resumeUrl: socket.resumeUrl
+            resumeUrl: socket.resumeUrl,
         };
     }
 
@@ -203,7 +219,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
                     results[key] = {
                         type: typeof val,
                         keyCount: entries.length,
-                        sample: Object.fromEntries(entries.slice(0, 20).map(([k, v]) => [k, typeof v === "function" ? "(function)" : v]))
+                        sample: Object.fromEntries(entries.slice(0, 20).map(([k, v]) => [k, typeof v === "function" ? "(function)" : v])),
                     };
                 } else {
                     results[key] = val;
@@ -217,7 +233,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             const val = DiscordConstants[key];
             summary[key] = {
                 type: typeof val,
-                keyCount: val && typeof val === "object" ? Object.keys(val as object).length : undefined
+                keyCount: val && typeof val === "object" ? Object.keys(val as object).length : undefined,
             };
         }
         return { count: categories.length, categories: summary };
@@ -241,7 +257,9 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
                     }
                     return { count: matches.length, experiments: matches };
                 }
-            } catch { return { error: true, message: "Failed to query experiments" }; }
+            } catch {
+                return { error: true, message: "Failed to query experiments" };
+            }
         }
 
         try {
@@ -267,7 +285,13 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
         const p = PlatformUtilsModule;
         const env = (window as unknown as Record<string, unknown>).GLOBAL_ENV as Record<string, unknown> | undefined;
 
-        const safeBoolCall = (fn: unknown) => { try { return (fn as () => boolean)(); } catch { return null; } };
+        const safeBoolCall = (fn: unknown) => {
+            try {
+                return (fn as () => boolean)();
+            } catch {
+                return null;
+            }
+        };
 
         return {
             platform: p.getPlatform(),
@@ -279,14 +303,16 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             isLinux: safeBoolCall(p.isLinux),
             isMac: safeBoolCall(p.isMac),
             isPlatformEmbedded: safeBoolCall(p.isPlatformEmbedded),
-            env: env ? {
-                releaseChannel: env.RELEASE_CHANNEL,
-                buildNumber: env.BUILD_NUMBER,
-                versionHash: (env.VERSION_HASH as string)?.slice(0, 16),
-                apiEndpoint: env.API_ENDPOINT,
-                gatewayEndpoint: env.GATEWAY_ENDPOINT,
-                cdnHost: env.CDN_HOST,
-            } : undefined
+            env: env
+                ? {
+                      releaseChannel: env.RELEASE_CHANNEL,
+                      buildNumber: env.BUILD_NUMBER,
+                      versionHash: (env.VERSION_HASH as string)?.slice(0, 16),
+                      apiEndpoint: env.API_ENDPOINT,
+                      gatewayEndpoint: env.GATEWAY_ENDPOINT,
+                      cdnHost: env.CDN_HOST,
+                  }
+                : undefined,
         };
     }
 
@@ -321,7 +347,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             spacing: t.spacing,
             modules: t.modules ? Object.keys(t.modules) : undefined,
             sampleColors: colorKeys.slice(0, LIMITS.DISCORD.TOKEN_COLOR_SLICE).map(k => ({ name: k, css: t.colors[k]?.css })),
-            tip: "Use filter to search colors by name"
+            tip: "Use filter to search colors by name",
         };
     }
 
@@ -335,7 +361,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
         return {
             functionCount: functions.length,
             functions,
-            tip: "Use evaluateCode to call functions, e.g. IconUtils.getUserAvatarURL(user)"
+            tip: "Use evaluateCode to call functions, e.g. IconUtils.getUserAvatarURL(user)",
         };
     }
 
@@ -348,6 +374,6 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
     return {
         user: currentUser ? { id: currentUser.id, username: currentUser.username, discriminator: currentUser.discriminator } : null,
         channel: channel ? { id: channel.id, name: channel.name, type: channel.type } : null,
-        guild: guild ? { id: guild.id, name: guild.name, ownerId: guild.ownerId } : null
+        guild: guild ? { id: guild.id, name: guild.name, ownerId: guild.ownerId } : null,
     };
 }

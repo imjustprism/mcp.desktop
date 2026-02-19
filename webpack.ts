@@ -71,7 +71,9 @@ export function resolveStore(name: string): { store: Record<string, unknown>; na
             const withSuffix = name + "Store";
             try {
                 return { store: findStore(withSuffix) as Record<string, unknown>, name: withSuffix };
-            } catch { return null; }
+            } catch {
+                return null;
+            }
         }
         return null;
     }

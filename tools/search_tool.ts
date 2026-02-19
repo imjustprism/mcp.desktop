@@ -61,6 +61,6 @@ export async function handleSearchTool(args: SearchToolArgs): Promise<unknown> {
                 return { id, snippet: source.slice(start, end) };
             }
             return { id, snippet: source.slice(0, 200) };
-        })
+        }),
     };
 }

@@ -56,7 +56,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
             total: events.size,
             filtered: eventList.length,
             events: eventList.slice(0, limit),
-            note: eventList.length > limit ? "Use filter to narrow" : undefined
+            note: eventList.length > limit ? "Use filter to narrow" : undefined,
         };
     }
 
@@ -72,7 +72,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
             event: eventName,
             storeHandlerCount: storeNames.length,
             storeHandlers: storeNames.slice(0, LIMITS.TRACE.HANDLER_SLICE),
-            subscriptionCount: subscriptions?.size ?? 0
+            subscriptionCount: subscriptions?.size ?? 0,
         };
     }
 
@@ -108,7 +108,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
             maxCaptures,
             startedAt: now,
             expiresAt: now + duration,
-            unsub: null
+            unsub: null,
         };
 
         if (!traceState.interceptor) {
@@ -143,7 +143,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
                 captureCount: t.captures.length,
                 maxCaptures: t.maxCaptures,
                 elapsed: Date.now() - t.startedAt,
-                remaining: Math.max(0, t.expiresAt - Date.now())
+                remaining: Math.max(0, t.expiresAt - Date.now()),
             }));
             return { activeTraces: traces.length, traces };
         }
@@ -158,7 +158,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
             id: traceId,
             captureCount: trace.captures.length,
             remaining,
-            ...summary
+            ...summary,
         };
     }
 
@@ -196,7 +196,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
             startedAt: now,
             expiresAt: now + duration,
             unsub: null,
-            isStoreTrace: true
+            isStoreTrace: true,
         };
 
         const handler = () => {

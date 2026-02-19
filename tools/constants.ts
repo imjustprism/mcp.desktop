@@ -6,29 +6,48 @@
 
 export const createIntlHashDotRegex = () => /\.t\.([A-Za-z0-9+/]{6})/g;
 export const createIntlHashBracketRegex = () => /\.t\["([A-Za-z0-9+/]{6,8})"\]/g;
-export const createIntlKeyPatternRegex = (global = false) =>
-    global ? /#\{intl::([A-Z][A-Z0-9_]*)/g : /#\{intl::([A-Z][A-Z0-9_]*)/;
+export const createIntlKeyPatternRegex = (global = false) => (global ? /#\{intl::([A-Z][A-Z0-9_]*)/g : /#\{intl::([A-Z][A-Z0-9_]*)/);
 
 export const JS_RESERVED_KEYWORDS = new Set([
-    "function", "return", "const", "if", "for", "while", "else",
-    "switch", "case", "break", "continue", "typeof", "instanceof",
-    "void", "delete", "new", "throw", "try", "catch", "finally",
-    "class", "extends", "super", "import", "export", "default",
-    "let", "var", "this", "null", "undefined", "true", "false",
+    "function",
+    "return",
+    "const",
+    "if",
+    "for",
+    "while",
+    "else",
+    "switch",
+    "case",
+    "break",
+    "continue",
+    "typeof",
+    "instanceof",
+    "void",
+    "delete",
+    "new",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "class",
+    "extends",
+    "super",
+    "import",
+    "export",
+    "default",
+    "let",
+    "var",
+    "this",
+    "null",
+    "undefined",
+    "true",
+    "false",
 ]);
 
 export const MINIFIED_VARS_PATTERN = /(?<![a-zA-Z_$])([etnirsoclu])(?=\s*[,)}:.]|$)/g;
-export const FORBIDDEN_PATCH_PATTERNS = [
-    /\be,t,n\b/,
-    /function\s*\(\s*e\s*\)/,
-    /return!0/,
-    /return!1/,
-] as const;
+export const FORBIDDEN_PATCH_PATTERNS = [/\be,t,n\b/, /function\s*\(\s*e\s*\)/, /return!0/, /return!1/] as const;
 
-export const NOISE_STRINGS = new Set([
-    "use strict", "function", "object", "string", "number",
-    "boolean", "undefined", "symbol", "bigint", "default",
-]);
+export const NOISE_STRINGS = new Set(["use strict", "function", "object", "string", "number", "boolean", "undefined", "symbol", "bigint", "default"]);
 
 export const MANA_COMPONENT_RE = /"data-mana-component":"([^"]+)"/g;
 export const MANA_COMPONENT_SINGLE_RE = /"data-mana-component":"([^"]+)"/;
@@ -44,11 +63,26 @@ export const IDENT_ASSIGN_RE = () => /(?<=[;{,\n])([a-zA-Z_$][a-zA-Z0-9_$]{7,35}
 export const PROP_ASSIGN_RE = () => /([a-zA-Z_$][\w$]{3,25}):\s*(?!\s*function)/g;
 
 export const ANCHOR_TYPE_ORDER: Readonly<Record<string, number>> = {
-    intl: 0, storeName: 1, errorString: 2, combined: 3, string: 4, ident: 5, enum: 6, funcCall: 7, prop: 8
+    intl: 0,
+    storeName: 1,
+    errorString: 2,
+    combined: 3,
+    string: 4,
+    ident: 5,
+    enum: 6,
+    funcCall: 7,
+    prop: 8,
 };
 
 export const OPTION_TYPE_NAMES: Readonly<Record<number, string>> = {
-    0: "STRING", 1: "NUMBER", 2: "BIGINT", 3: "BOOLEAN", 4: "SELECT", 5: "SLIDER", 6: "COMPONENT", 7: "CUSTOM"
+    0: "STRING",
+    1: "NUMBER",
+    2: "BIGINT",
+    3: "BOOLEAN",
+    4: "SELECT",
+    5: "SLIDER",
+    6: "COMPONENT",
+    7: "CUSTOM",
 };
 
 export const CONTEXT = {
@@ -68,9 +102,7 @@ export const CONTEXT = {
 
 export const REGEX_CACHE_MAX_SIZE = 100;
 
-export const INTERESTING_PROP_KEYWORDS = new Set([
-    "message", "channel", "guild", "user", "member", "role",
-]);
+export const INTERESTING_PROP_KEYWORDS = new Set(["message", "channel", "guild", "user", "member", "role"]);
 
 export const LIMITS = {
     REACT: {

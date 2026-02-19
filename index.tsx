@@ -103,8 +103,8 @@ const settings = definePluginSettings({
     logRequests: {
         type: OptionType.BOOLEAN,
         description: "Log incoming MCP requests to console",
-        default: false
-    }
+        default: false,
+    },
 });
 
 type ToolHandler = (args: any) => Promise<unknown> | unknown;
@@ -133,7 +133,7 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
 async function executeToolCall(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
     const cached = getCachedResult(name, args);
     if (cached !== null) {
-        return { content: [{ type: "text", text: serializeResult({ ...cached as object, cached: true }) }] };
+        return { content: [{ type: "text", text: serializeResult({ ...(cached as object), cached: true }) }] };
     }
 
     const handler = TOOL_HANDLERS[name];
@@ -141,10 +141,18 @@ async function executeToolCall(name: string, args: Record<string, unknown>): Pro
 
     try {
         const result = await handler(args);
+        if (result == null) {
+            return { content: [{ type: "text", text: JSON.stringify({ warning: `${name} returned no result`, args }) }] };
+        }
         setCachedResult(name, args, result);
-        return { content: [{ type: "text", text: serializeResult(result) }] };
+        const text = serializeResult(result);
+        if (!text || text === "null" || text === "undefined") {
+            return { content: [{ type: "text", text: JSON.stringify({ warning: `${name} produced empty output`, args }) }] };
+        }
+        return { content: [{ type: "text", text }] };
     } catch (error) {
-        return { content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: JSON.stringify({ error: true, message, tool: name, args }) }], isError: true };
     }
 }
 
@@ -157,7 +165,7 @@ const sessionStats: SessionStats = {
     connectedAt: 0,
     requests: 0,
     toolCalls: 0,
-    errors: 0
+    errors: 0,
 };
 
 async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null> {
@@ -186,8 +194,8 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
                 result: {
                     protocolVersion: PROTOCOL_VERSION,
                     capabilities: { tools: { listChanged: false } },
-                    serverInfo: SERVER_INFO
-                }
+                    serverInfo: SERVER_INFO,
+                },
             };
         }
 
@@ -225,15 +233,16 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
             let toolResult: ToolCallResult;
             try {
                 const timeout = getAdaptiveTimeout(params.name, params.arguments);
-                const isBruteforce = params.name === "intl" && params.arguments?.action === "bruteforce";
-                toolResult = isBruteforce
-                    ? await executeToolCall(params.name, params.arguments ?? {})
-                    : await withTimeout(executeToolCall(params.name, params.arguments ?? {}), timeout, params.name);
+                toolResult = await withTimeout(executeToolCall(params.name, params.arguments ?? {}), timeout, params.name);
             } catch (e) {
                 sessionStats.errors++;
                 const errorMsg = e instanceof Error ? e.message : String(e);
                 logger.error(`${params.name}: ${errorMsg}`);
-                toolResult = { content: [{ type: "text", text: `Error: ${errorMsg}` }], isError: true };
+                const action = params.arguments?.action as string | undefined;
+                toolResult = {
+                    content: [{ type: "text", text: JSON.stringify({ error: true, message: errorMsg, tool: params.name, action: action ?? null }) }],
+                    isError: true,
+                };
             }
 
             const elapsed = performance.now() - start;
@@ -308,7 +317,7 @@ export default definePlugin({
                 : "No active session";
             Toasts.show({ id: Toasts.genId(), message: msg, type: sessionStats.initialized ? Toasts.Type.SUCCESS : Toasts.Type.MESSAGE });
             logger.info(`Session: ${msg}`);
-        }
+        },
     },
 
     polling: false,
@@ -380,5 +389,5 @@ export default definePlugin({
         clearCSSIndexCache();
         toolCache.clear();
         Native.stopServer();
-    }
+    },
 });

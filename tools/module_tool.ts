@@ -8,8 +8,22 @@ import { canonicalizeMatch } from "@utils/patches";
 import { loadLazyChunks } from "debug/loadLazyChunks";
 
 import { AnchorCandidate, CompEntry, ModuleMatch, ModuleToolArgs, ModuleWatch, SuggestCandidate, ToolResult, WebpackExport, WebpackModule } from "../types";
-import { DesignTokensModule, factoryListeners, filters, Flux, getCommonModules, UIBarrelModule, wreq } from "../webpack";
-import { ANCHOR_TYPE_ORDER, CONTEXT, createIntlHashBracketRegex, createIntlHashDotRegex, ENUM_MEMBER_RE, FUNC_CALL_RE, ICON_DETECT_RE, IDENT_ASSIGN_RE, LIMITS, MANA_COMPONENT_SINGLE_RE, NOISE_STRINGS, STORE_NAME_RE, STRING_LITERAL_RE } from "./constants";
+import { DesignTokensModule, Flux, factoryListeners, filters, getCommonModules, UIBarrelModule, wreq } from "../webpack";
+import {
+    ANCHOR_TYPE_ORDER,
+    CONTEXT,
+    createIntlHashBracketRegex,
+    createIntlHashDotRegex,
+    ENUM_MEMBER_RE,
+    FUNC_CALL_RE,
+    ICON_DETECT_RE,
+    IDENT_ASSIGN_RE,
+    LIMITS,
+    MANA_COMPONENT_SINGLE_RE,
+    NOISE_STRINGS,
+    STORE_NAME_RE,
+    STRING_LITERAL_RE,
+} from "./constants";
 import {
     clearBatchResultsCache,
     clearComponentIndexCache,
@@ -38,7 +52,10 @@ function findModulesWithIds(filter: (m: unknown) => boolean, max: number): Modul
     for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
         if (results.length >= max || !mod?.loaded || mod.exports == null) continue;
         const exp = mod.exports;
-        if (filter(exp)) { results.push({ id, exports: exp, key: "module" }); continue; }
+        if (filter(exp)) {
+            results.push({ id, exports: exp, key: "module" });
+            continue;
+        }
         if (typeof exp !== "object") continue;
         for (const key of Object.keys(exp)) {
             const nested = exp[key];
@@ -68,7 +85,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             loadedModules,
             patchedModules: patchedCount,
             stores: Flux.Store.getAll().length,
-            loadedPercentage: Math.round((loadedModules / totalModules) * 100)
+            loadedPercentage: Math.round((loadedModules / totalModules) * 100),
         };
     }
 
@@ -107,7 +124,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 loadedBefore,
                 loadedAfter,
                 newLoaded,
-                message: newModules > 0 ? `Loaded ${newModules} factories, ${newLoaded} instances` : "Lazy chunks already loaded"
+                message: newModules > 0 ? `Loaded ${newModules} factories, ${newLoaded} instances` : "Lazy chunks already loaded",
             };
         } finally {
             moduleWatchState.isLoadingLazy = false;
@@ -117,7 +134,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     if (action === "watch") {
         const duration = Math.min(Math.max(args.duration ?? 30000, 5000), 120000);
         const maxCaptures = Math.min(args.maxCaptures ?? 100, 500);
-        const filterRegex = args.filter ? parseRegex(args.filter) ?? new RegExp(args.filter, "i") : null;
+        const filterRegex = args.filter ? (parseRegex(args.filter) ?? new RegExp(args.filter, "i")) : null;
 
         const watchId = moduleWatchState.nextId++;
         const now = Date.now();
@@ -132,7 +149,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             startedAt: now,
             expiresAt: now + duration,
             baselineCount,
-            listener: null
+            listener: null,
         };
 
         const listener = () => {
@@ -162,7 +179,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 filter: w.filter?.source ?? "*",
                 newModuleCount: w.newModules.length,
                 elapsed: Date.now() - w.startedAt,
-                remaining: Math.max(0, w.expiresAt - Date.now())
+                remaining: Math.max(0, w.expiresAt - Date.now()),
             }));
             return { activeWatches: watches.length, watches, lastLazyLoad: moduleWatchState.lastLazyLoadResult };
         }
@@ -176,7 +193,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             newModuleCount: watch.newModules.length,
             remaining: Math.max(0, watch.expiresAt - Date.now()),
             newModules: watch.newModules.slice(0, 50),
-            truncated: truncated ? true : undefined
+            truncated: truncated ? true : undefined,
         };
     }
 
@@ -204,7 +221,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     if (action === "size" && id) {
         const source = getModuleSource(id);
         if (!source) return { found: false, message: `Module ${id} not found` };
-        return { id, size: source.length, sizeKB: Math.round(source.length / 1024 * 10) / 10 };
+        return { id, size: source.length, sizeKB: Math.round((source.length / 1024) * 10) / 10 };
     }
 
     if ((action === "extract" || (!action && id)) && id) {
@@ -242,9 +259,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         if (!source) return { found: false, message: `Module ${id} not found` };
 
         const parsed = parseRegex(pattern);
-        const searchPattern = parsed
-            ? canonicalizeMatch(parsed)
-            : new RegExp(canonicalizeMatch(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+        const searchPattern = parsed ? canonicalizeMatch(parsed) : new RegExp(canonicalizeMatch(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
         const match = source.match(searchPattern);
         if (!match?.index) return { found: false, pattern, message: "Pattern not found in module" };
 
@@ -267,14 +282,20 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const maxRegionLen = LIMITS.MODULE.DIFF_MAX_REGION_LEN;
         const changes: Array<{ offset: number; original: string; patched: string }> = [];
 
-        let oi = 0, pi = 0;
+        let oi = 0,
+            pi = 0;
         while (oi < original.length && pi < patchedClean.length) {
-            if (original[oi] === patchedClean[pi]) { oi++; pi++; continue; }
+            if (original[oi] === patchedClean[pi]) {
+                oi++;
+                pi++;
+                continue;
+            }
 
             const changeStart = oi;
             const pChangeStart = pi;
 
-            let bestOEnd = -1, bestPEnd = -1;
+            let bestOEnd = -1,
+                bestPEnd = -1;
             for (let look = 1; look <= LIMITS.MODULE.DIFF_RESYNC_WINDOW && bestOEnd < 0; look++) {
                 for (let oShift = 0; oShift <= look; oShift++) {
                     const pShift = look - oShift;
@@ -282,8 +303,13 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                     const pPos = pi + pShift;
                     if (oPos >= original.length || pPos >= patchedClean.length) continue;
                     let match = 0;
-                    while (match < LIMITS.MODULE.DIFF_RESYNC_MATCH && oPos + match < original.length && pPos + match < patchedClean.length && original[oPos + match] === patchedClean[pPos + match]) match++;
-                    if (match >= LIMITS.MODULE.DIFF_RESYNC_MATCH) { bestOEnd = oPos; bestPEnd = pPos; break; }
+                    while (match < LIMITS.MODULE.DIFF_RESYNC_MATCH && oPos + match < original.length && pPos + match < patchedClean.length && original[oPos + match] === patchedClean[pPos + match])
+                        match++;
+                    if (match >= LIMITS.MODULE.DIFF_RESYNC_MATCH) {
+                        bestOEnd = oPos;
+                        bestPEnd = pPos;
+                        break;
+                    }
                 }
             }
 
@@ -291,7 +317,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 changes.push({
                     offset: changeStart,
                     original: original.slice(Math.max(0, changeStart - pad), original.length).slice(0, maxRegionLen),
-                    patched: patchedClean.slice(Math.max(0, pChangeStart - pad), patchedClean.length).slice(0, maxRegionLen)
+                    patched: patchedClean.slice(Math.max(0, pChangeStart - pad), patchedClean.length).slice(0, maxRegionLen),
                 });
                 break;
             }
@@ -336,13 +362,32 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                     exportKey: m.key,
                     type: typeof m.exports,
                     keys: typeof m.exports === "object" && m.exports ? Object.keys(m.exports).slice(0, 30) : undefined,
-                    sample: typeof m.exports === "object" && m.exports ? Object.fromEntries(Object.keys(m.exports).slice(0, 10).map(k => [k, typeof (m.exports as Record<string, unknown>)[k]])) : typeof m.exports === "function" ? (m.exports as Function).toString().slice(0, 200) : String(m.exports)
-                }))
+                    sample:
+                        typeof m.exports === "object" && m.exports
+                            ? Object.fromEntries(
+                                  Object.keys(m.exports)
+                                      .slice(0, 10)
+                                      .map(k => [k, typeof (m.exports as Record<string, unknown>)[k]]),
+                              )
+                            : typeof m.exports === "function"
+                              ? (m.exports as Function).toString().slice(0, 200)
+                              : String(m.exports),
+                })),
             };
         }
         const m = mods[0];
         const mod = m.exports as Record<string, unknown>;
-        return { found: true, moduleId: m.id, exportKey: m.key, keys: Object.keys(mod), sample: Object.fromEntries(Object.keys(mod).slice(0, 20).map(k => [k, typeof mod[k]])) };
+        return {
+            found: true,
+            moduleId: m.id,
+            exportKey: m.key,
+            keys: Object.keys(mod),
+            sample: Object.fromEntries(
+                Object.keys(mod)
+                    .slice(0, 20)
+                    .map(k => [k, typeof mod[k]]),
+            ),
+        };
     }
 
     if (code?.length) {
@@ -376,8 +421,8 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                     exportKey: m.key,
                     type: typeof m.exports,
                     source: typeof m.exports === "function" ? (m.exports as Function).toString().slice(0, 200) : undefined,
-                    keys: typeof m.exports === "object" && m.exports ? Object.keys(m.exports).slice(0, 30) : undefined
-                }))
+                    keys: typeof m.exports === "object" && m.exports ? Object.keys(m.exports).slice(0, 30) : undefined,
+                })),
             };
         }
         const m = mods[0];
@@ -406,7 +451,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                         exportKey: key,
                         displayName: dn,
                         type: typeof val === "function" ? (hasRender ? "Component" : "Function") : "Object",
-                        keys: typeof val === "object" ? Object.keys(val).slice(0, 15) : undefined
+                        keys: typeof val === "object" ? Object.keys(val).slice(0, 15) : undefined,
                     });
                 }
             };
@@ -435,7 +480,10 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 if (typeof val !== "function") return;
                 const fn = val as Function & { displayName?: string };
                 const src = fn.toString().slice(0, 500);
-                if (ICON_DETECT_RE.test(src.slice(0, 200))) { iconKeys.push(key); return; }
+                if (ICON_DETECT_RE.test(src.slice(0, 200))) {
+                    iconKeys.push(key);
+                    return;
+                }
                 const entry: CompEntry = { key };
                 if (fn.displayName) entry.displayName = fn.displayName;
                 const props = extractPropsFromFunction(fn);
@@ -559,9 +607,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             const entry = index.get(className);
             if (entry) {
                 const modInfo = modules.get(entry.moduleId);
-                const allClasses = modInfo ? Object.fromEntries(
-                    Object.entries(modInfo.classes).slice(0, LIMITS.CSS.MAX_CLASSES_PER_MODULE)
-                ) : {};
+                const allClasses = modInfo ? Object.fromEntries(Object.entries(modInfo.classes).slice(0, LIMITS.CSS.MAX_CLASSES_PER_MODULE)) : {};
                 return {
                     found: true,
                     reverse: true,
@@ -578,11 +624,14 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const filter = (m: unknown) => {
             if (!m || typeof m !== "object") return false;
             const keys = Object.keys(m);
-            return keys.length > 0 && keys.some(k => {
-                const v = (m as Record<string, unknown>)[k];
-                if (typeof v !== "string") return false;
-                return k.toLowerCase().includes(lower) || v.toLowerCase().includes(lower);
-            });
+            return (
+                keys.length > 0 &&
+                keys.some(k => {
+                    const v = (m as Record<string, unknown>)[k];
+                    if (typeof v !== "string") return false;
+                    return k.toLowerCase().includes(lower) || v.toLowerCase().includes(lower);
+                })
+            );
         };
         const mods = findModulesWithIds(filter, limit);
 
@@ -624,7 +673,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                         exportKey: exp === commonValue ? "module.exports" : "default",
                         type: typeof commonValue === "function" ? (hasRender ? "Component" : "Function") : typeof commonValue,
                         displayName: commonValue.displayName ?? commonValue.name,
-                        source: "Webpack.Common"
+                        source: "Webpack.Common",
                     });
                     break;
                 }
@@ -637,7 +686,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                             exportKey: key,
                             type: typeof commonValue === "function" ? (hasRender ? "Component" : "Function") : typeof commonValue,
                             displayName: commonValue.displayName ?? commonValue.name,
-                            source: "Webpack.Common"
+                            source: "Webpack.Common",
                         });
                         break;
                     }
@@ -659,7 +708,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                         moduleId: modId,
                         exportKey: key,
                         type: typeof val === "function" ? (hasRender ? "Component" : "Function") : typeof val,
-                        displayName: nm
+                        displayName: nm,
                     });
                 }
             };
@@ -675,7 +724,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             inWebpackCommon: !!commonValue,
             count: matches.length,
             matches,
-            tip: matches.length ? (commonValue ? `Webpack.Common.${exportName}` : undefined) : (commonValue ? "In Webpack.Common but module ID unresolved" : `No export "${exportName}" found`)
+            tip: matches.length ? (commonValue ? `Webpack.Common.${exportName}` : undefined) : commonValue ? "In Webpack.Common but module ID unresolved" : `No export "${exportName}" found`,
         };
     }
 
@@ -699,7 +748,10 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         for (const regex of [createIntlHashDotRegex(), createIntlHashBracketRegex()]) {
             source = source.replace(regex, (match, hash: string) => {
                 const key = getIntlKeyFromHash(hash);
-                if (key) { annotations.push({ hash, key }); return `.t[/*${key}*/]`; }
+                if (key) {
+                    annotations.push({ hash, key });
+                    return `.t[/*${key}*/]`;
+                }
                 return match;
             });
         }
@@ -712,7 +764,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             annotationCount: annotations.length,
             size: source.length,
             truncated: source.length > maxLen,
-            source: source.slice(0, maxLen)
+            source: source.slice(0, maxLen),
         };
     }
 
@@ -768,7 +820,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             { regex: /([a-zA-Z_$][\w$]{3,30}):/g, extract: m => ({ find: `${m[1]}:`, search: `${m[1]}:`, type: "prop" }) },
             { regex: FUNC_CALL_RE(), extract: m => ({ find: `.${m[1]}(`, search: `.${m[1]}(`, type: "funcCall" }) },
             { regex: ENUM_MEMBER_RE(), extract: m => ({ find: `.${m[1]}`, search: `.${m[1]}`, type: "enum" }) },
-            { regex: IDENT_ASSIGN_RE(), extract: m => NOISE_STRINGS.has(m[1]) || /^[a-z]{1,2}$/.test(m[1]) ? null : { find: m[1], search: m[1], type: "ident" } },
+            { regex: IDENT_ASSIGN_RE(), extract: m => (NOISE_STRINGS.has(m[1]) || /^[a-z]{1,2}$/.test(m[1]) ? null : { find: m[1], search: m[1], type: "ident" }) },
         ];
 
         for (const { regex, extract } of anchorScans) {
@@ -778,8 +830,8 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             }
         }
 
-        const ctxSuffixes = [";", ")", ",", "}", "\""];
-        const ctxPrefixes = ["=", "(", ",", "{", "\""];
+        const ctxSuffixes = [";", ")", ",", "}", '"'];
+        const ctxPrefixes = ["=", "(", ",", "{", '"'];
 
         for (const c of [...candidates]) {
             if (c.unique || c.type === "intl" || c.type === "combined") continue;
@@ -804,7 +856,8 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             rawAnchors.sort((a, b) => a.index - b.index);
             for (let i = 0; i < rawAnchors.length && candidates.filter(c => c.unique).length < 5; i++) {
                 for (let j = i + 1; j < rawAnchors.length; j++) {
-                    const a = rawAnchors[i], b = rawAnchors[j];
+                    const a = rawAnchors[i],
+                        b = rawAnchors[j];
                     const gap = b.index - (a.index + a.search.length);
                     if (gap < 0 || gap > LIMITS.MODULE.SUGGEST_MAX_COMBINED_GAP) continue;
                     const between = source.slice(a.index + a.search.length, b.index);
@@ -852,11 +905,12 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const parsed = parseRegex(pattern);
         const regex = parsed ? canonicalizeMatch(parsed) : null;
         const canonicalized = canonicalizeMatch(pattern);
-        const results = searchModulesOptimized(source =>
-            regex ? regex.test(source) : source.includes(canonicalized), limit);
+        const results = searchModulesOptimized(source => (regex ? regex.test(source) : source.includes(canonicalized)), limit);
 
         return {
-            count: results.length, ids: results, preview: results.map(moduleId => {
+            count: results.length,
+            ids: results,
+            preview: results.map(moduleId => {
                 const source = getModuleSource(moduleId);
                 const match = regex ? source.match(regex) : null;
                 const idx = match?.index ?? source.indexOf(canonicalized);
@@ -866,7 +920,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                     return { id: moduleId, snippet: source.slice(start, end) };
                 }
                 return { id: moduleId, snippet: source.slice(0, 200) };
-            })
+            }),
         };
     }
 

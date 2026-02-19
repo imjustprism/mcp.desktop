@@ -6,7 +6,6 @@
 
 import { getIntlMessageFromHash } from "@utils/discord";
 import { runtimeHashMessageKey } from "@utils/intlHash";
-import { WebpackPatcher } from "Vencord";
 
 import keyMapJson from "../map/key_map.json";
 import {
@@ -29,8 +28,9 @@ import {
     StoryEntry,
     WebpackModule,
 } from "../types";
-import { factoryListeners, findAll, findStore, Flux, getFluxDispatcherInternal, getIconsModuleId, getUIBarrelModuleId, i18n, IconsModule, plugins, UIBarrelModule, wreq } from "../webpack";
-import { createIntlKeyPatternRegex, CSS_CLASS_RE, LIMITS, MANA_COMPONENT_RE, REGEX_CACHE_MAX_SIZE } from "./constants";
+import { Flux, factoryListeners, findAll, findStore, getFluxDispatcherInternal, getIconsModuleId, getUIBarrelModuleId, IconsModule, i18n, plugins, UIBarrelModule, wreq } from "../webpack";
+import { CSS_CLASS_RE, createIntlKeyPatternRegex, LIMITS, MANA_COMPONENT_RE, REGEX_CACHE_MAX_SIZE } from "./constants";
+import { WebpackPatcher } from "Vencord";
 
 const KEY_MAP: Record<string, string> = keyMapJson;
 const { getFactoryPatchedSource, getFactoryPatchedBy } = WebpackPatcher;
@@ -198,6 +198,33 @@ export function getLocaleMessages(): Record<string, unknown[]> | null {
     return null;
 }
 
+let orderedIntlHashesCache: string[] | null = null;
+
+export function getOrderedIntlHashes(): string[] | null {
+    if (orderedIntlHashesCache) return orderedIntlHashesCache;
+
+    for (const [id, factory] of Object.entries(wreq.m) as [string, { toString(): string }][]) {
+        const src = factory.toString();
+        if (src.length < 500000 || !src.includes('"323362"')) continue;
+
+        const pattern = /"([A-Za-z0-9+/]{6})":/g;
+        const hashes: string[] = [];
+        const seen = new Set<string>();
+        let m: RegExpExecArray | null;
+        while ((m = pattern.exec(src))) {
+            if (!seen.has(m[1])) {
+                seen.add(m[1]);
+                hashes.push(m[1]);
+            }
+        }
+        if (hashes.length > 10000) {
+            orderedIntlHashesCache = hashes;
+            return hashes;
+        }
+    }
+    return null;
+}
+
 export function extractIntlText(arr: unknown): string {
     if (!Array.isArray(arr)) return String(arr ?? "");
     return arr.filter(item => typeof item === "string").join("");
@@ -267,8 +294,10 @@ export function serializeResult(value: unknown, maxLength = 50000): string {
     const sanitize = (val: unknown): unknown => {
         if (val == null) return null;
         switch (typeof val) {
-            case "bigint": return `${val}n`;
-            case "symbol": return val.toString();
+            case "bigint":
+                return `${val}n`;
+            case "symbol":
+                return val.toString();
             case "function": {
                 const str = val.toString();
                 return str.length > 500 ? str.slice(0, 500) + "..." : str;
@@ -288,10 +317,14 @@ export function serializeResult(value: unknown, maxLength = 50000): string {
                     const keys = Object.keys(val).filter(k => (val as Record<string, unknown>)[k] !== undefined);
                     for (const k of keys.slice(0, 50)) obj[k] = sanitize((val as Record<string, unknown>)[k]);
                     return obj;
-                } finally { depth--; }
+                } finally {
+                    depth--;
+                }
             }
-            case "string": return val.length > 1000 ? val.slice(0, 1000) + "..." : val;
-            default: return val;
+            case "string":
+                return val.length > 1000 ? val.slice(0, 1000) + "..." : val;
+            default:
+                return val;
         }
     };
 
@@ -315,7 +348,7 @@ export function extractModule(id: PropertyKey, patched = true): string {
 }
 
 export function getModulePatchedBy(id: PropertyKey): string[] {
-    return [...getFactoryPatchedBy(id) ?? []];
+    return [...(getFactoryPatchedBy(id) ?? [])];
 }
 
 export function getAllStoreNames(): string[] {
@@ -325,17 +358,33 @@ export function getAllStoreNames(): string[] {
         .sort();
 }
 
+const RENDERER_TIMEOUT_MS: Record<string, number> = {
+    "intl:bruteforce": 600_000,
+    "intl:test": 120_000,
+    "intl:unknown": 60_000,
+    "module:loadLazy": 120_000,
+    "module:watch": 120_000,
+    "module:watchGet": 60_000,
+    "module:components": 120_000,
+    "trace:start": 120_000,
+    "trace:store": 120_000,
+    "intercept:set": 120_000,
+    "patch:benchmark": 60_000,
+    "patch:slowscan": 60_000,
+    "patch:analyze": 60_000,
+    "patch:finds": 60_000,
+    "discord:waitForIpc": 30_000,
+};
+
 export function getAdaptiveTimeout(toolName: string, args?: Record<string, unknown>): number {
-    if (toolName === "module" && args?.action === "loadLazy") return 120000;
-    if (toolName === "intl" && args?.action === "bruteforce") return 300000;
-    if (toolName === "trace" || toolName === "intercept") return 120000;
-    if (toolName === "module" || toolName === "intl") return 60000;
-    return 5000;
+    const action = args?.action as string | undefined;
+    if (action) return RENDERER_TIMEOUT_MS[`${toolName}:${action}`] ?? 30_000;
+    return 30_000;
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, toolName: string): Promise<T> {
     return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`"${toolName}" timed out (${ms}ms)`)), ms);
+        const timer = setTimeout(() => reject(new Error(`${toolName} timed out after ${Math.round(ms / 1000)}s. The operation took too long to complete.`)), ms);
         promise.then(resolve, reject).finally(() => clearTimeout(timer));
     });
 }
@@ -359,7 +408,9 @@ export function cleanupIntercept(id: number): boolean {
     if (intercept.methodKey && intercept.methodParent) {
         try {
             intercept.methodParent[intercept.methodKey] = intercept.original;
-        } catch { /* property not writable */ }
+        } catch {
+            /* property not writable */
+        }
     } else {
         const mod = wreq.c[intercept.moduleId] as WebpackModule | undefined;
         if (mod) {
@@ -369,7 +420,9 @@ export function cleanupIntercept(id: number): boolean {
                 } else if (mod.exports) {
                     Object.defineProperty(mod.exports, intercept.exportKey, { value: intercept.original, configurable: true, writable: true });
                 }
-            } catch { /* property not configurable */ }
+            } catch {
+                /* property not configurable */
+            }
         }
     }
     interceptState.active.delete(id);
@@ -434,13 +487,34 @@ export function cleanupAllModuleWatches(): void {
 }
 
 const FIBER_TAGS: Readonly<Record<number, string>> = {
-    0: "Function", 1: "Class", 2: "Indeterminate", 3: "HostRoot", 4: "Portal",
-    5: "DOM", 6: "Text", 7: "Fragment", 8: "Mode", 9: "ContextConsumer",
-    10: "ContextProvider", 11: "ForwardRef", 12: "Profiler", 13: "Suspense",
-    14: "Memo", 15: "SimpleMemo", 16: "Lazy", 17: "IncompleteClass",
-    18: "DehydratedFragment", 19: "SuspenseList", 20: "Scope",
-    21: "Offscreen", 22: "LegacyHidden", 23: "Cache", 24: "TracingMarker",
-    25: "HostHoistable", 26: "HostSingleton", 27: "HostResource"
+    0: "Function",
+    1: "Class",
+    2: "Indeterminate",
+    3: "HostRoot",
+    4: "Portal",
+    5: "DOM",
+    6: "Text",
+    7: "Fragment",
+    8: "Mode",
+    9: "ContextConsumer",
+    10: "ContextProvider",
+    11: "ForwardRef",
+    12: "Profiler",
+    13: "Suspense",
+    14: "Memo",
+    15: "SimpleMemo",
+    16: "Lazy",
+    17: "IncompleteClass",
+    18: "DehydratedFragment",
+    19: "SuspenseList",
+    20: "Scope",
+    21: "Offscreen",
+    22: "LegacyHidden",
+    23: "Cache",
+    24: "TracingMarker",
+    25: "HostHoistable",
+    26: "HostSingleton",
+    27: "HostResource",
 };
 
 export function getFiber(el: Element): ReactFiber | null {
@@ -530,10 +604,13 @@ export function isRenderedClassName(input: string): boolean {
 function isCSSModule(exports: unknown): boolean {
     if (!exports || typeof exports !== "object") return false;
     const keys = Object.keys(exports);
-    return keys.length >= 3 && keys.every(k => {
-        const v = (exports as Record<string, unknown>)[k];
-        return typeof v === "string" && CSS_CLASS_RE.test(v);
-    });
+    return (
+        keys.length >= 3 &&
+        keys.every(k => {
+            const v = (exports as Record<string, unknown>)[k];
+            return typeof v === "string" && CSS_CLASS_RE.test(v);
+        })
+    );
 }
 
 function buildCSSIndex(): CSSIndexCache {
@@ -639,8 +716,7 @@ function buildComponentIndex(): ComponentIndex {
                                     label: cv.label as string | undefined,
                                     defaultValue: cv.defaultValue,
                                     options: Array.isArray(cv.options)
-                                        ? cv.options.slice(0, LIMITS.COMPONENT.MAX_OPTIONS).map(o =>
-                                            o && typeof o === "object" && "value" in (o as object) ? (o as { value: unknown }).value : o)
+                                        ? cv.options.slice(0, LIMITS.COMPONENT.MAX_OPTIONS).map(o => (o && typeof o === "object" && "value" in (o as object) ? (o as { value: unknown }).value : o))
                                         : undefined,
                                 };
                             }
@@ -666,7 +742,8 @@ function buildComponentIndex(): ComponentIndex {
         }
     }
 
-    let components = 0, enums = 0;
+    let components = 0,
+        enums = 0;
     const uiBarrelId = getUIBarrelModuleId();
     if (UIBarrelModule) {
         for (const val of Object.values(UIBarrelModule)) {

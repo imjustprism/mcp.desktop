@@ -19,7 +19,7 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         return {
             count: stores.length,
             stores: stores.slice(0, LIMITS.STORE.LIST_SLICE),
-            note: stores.length > LIMITS.STORE.LIST_SLICE ? "Use filter to narrow" : undefined
+            note: stores.length > LIMITS.STORE.LIST_SLICE ? "Use filter to narrow" : undefined,
         };
     }
 
@@ -52,7 +52,9 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
                             break;
                         }
                     }
-                } catch { continue; }
+                } catch {
+                    continue;
+                }
             }
         }
 
@@ -83,7 +85,7 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
             storeName: resolvedName,
             dispatchToken,
             subscriptionCount: subscriptions.length,
-            subscriptions: [...new Set(subscriptions)].sort()
+            subscriptions: [...new Set(subscriptions)].sort(),
         };
     }
 
@@ -93,7 +95,9 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         let level = 0;
 
         while (currentProto && level < depth) {
-            const methodNames = Object.getOwnPropertyNames(currentProto).filter(k => k !== "constructor").sort();
+            const methodNames = Object.getOwnPropertyNames(currentProto)
+                .filter(k => k !== "constructor")
+                .sort();
             const methods: Array<{ name: string; type?: string }> = [];
 
             for (const nm of methodNames) {
@@ -105,7 +109,9 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
                             const ret = (val as () => unknown).call(store);
                             entry.type = ret === null ? "null" : Array.isArray(ret) ? "array" : typeof ret;
                         } else entry.type = typeof val;
-                    } catch { entry.type = "unknown"; }
+                    } catch {
+                        entry.type = "unknown";
+                    }
                 }
                 methods.push(entry);
             }
@@ -119,15 +125,15 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
             found: true,
             store: resolvedName,
             levels,
-            totalMethods: levels.reduce((acc, l) => acc + l.methods.length, 0)
+            totalMethods: levels.reduce((acc, l) => acc + l.methods.length, 0),
         };
     }
 
     if ((action === "call" || action === "state") && method) {
         const desc = Object.getOwnPropertyDescriptor(store, method) ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(store), method);
 
-        const cap = (v: unknown) => typeof v === "object" && v !== null ? serializeResult(v, LIMITS.STORE.SERIALIZE_CALL) : v;
-        const typeOf = (v: unknown) => v === null ? "null" : v === undefined ? "undefined" : Array.isArray(v) ? "array" : typeof v;
+        const cap = (v: unknown) => (typeof v === "object" && v !== null ? serializeResult(v, LIMITS.STORE.SERIALIZE_CALL) : v);
+        const typeOf = (v: unknown) => (v === null ? "null" : v === undefined ? "undefined" : Array.isArray(v) ? "array" : typeof v);
 
         if (desc?.get) {
             try {
@@ -171,6 +177,6 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         displayName: resolvedName,
         methods: methods.sort(),
         getters: getters.sort(),
-        properties: properties.sort()
+        properties: properties.sort(),
     };
 }

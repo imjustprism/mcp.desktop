@@ -60,7 +60,9 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
         }
 
         if (typeof target !== "function") {
-            const available = Object.keys(mod.exports).filter(k => typeof mod.exports[k] === "function").slice(0, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS);
+            const available = Object.keys(mod.exports)
+                .filter(k => typeof mod.exports[k] === "function")
+                .slice(0, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS);
 
             const methods = collectMethods(target, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS);
             const exportObjects = Object.keys(mod.exports)
@@ -77,8 +79,8 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
                 tip: methods.length
                     ? `Use "${exportKey}.methodName" for method interception`
                     : exportObjects.length
-                        ? `Try "${exportObjects[0].key}.methodName" (${exportObjects[0].displayName ?? "object"} with ${exportObjects[0].methodCount} methods)`
-                        : undefined
+                      ? `Try "${exportObjects[0].key}.methodName" (${exportObjects[0].displayName ?? "object"} with ${exportObjects[0].methodCount} methods)`
+                      : undefined,
             };
         }
 
@@ -92,7 +94,7 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
             original: target as (...args: unknown[]) => unknown,
             captures: [],
             maxCaptures,
-            expiresAt: Date.now() + duration
+            expiresAt: Date.now() + duration,
         };
 
         const wrapper = function (this: unknown, ...fnArgs: unknown[]) {
@@ -137,7 +139,7 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
                 moduleId: i.moduleId,
                 exportKey: i.exportKey,
                 captureCount: i.captures.length,
-                remaining: Math.max(0, i.expiresAt - Date.now())
+                remaining: Math.max(0, i.expiresAt - Date.now()),
             }));
             return { activeIntercepts: intercepts.length, intercepts };
         }
@@ -152,7 +154,7 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
             exportKey: intercept.exportKey,
             captureCount: intercept.captures.length,
             remaining: Math.max(0, intercept.expiresAt - Date.now()),
-            ...summary
+            ...summary,
         };
     }
 

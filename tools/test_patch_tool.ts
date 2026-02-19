@@ -8,7 +8,20 @@ import { canonicalizeMatch } from "@utils/patches";
 
 import { AnchorInfo, FindModuleMatch, MatchDiagnostic, RegexWarning, TestPatchToolArgs } from "../types";
 import { wreq } from "../webpack";
-import { ANCHOR_TYPE_ORDER, CONTEXT, createIntlHashBracketRegex, createIntlHashDotRegex, ENUM_MEMBER_RE, FUNC_CALL_RE, IDENT_ASSIGN_RE, JS_RESERVED_KEYWORDS, NOISE_STRINGS, PROP_ASSIGN_RE, STORE_NAME_RE, STRING_LITERAL_RE } from "./constants";
+import {
+    ANCHOR_TYPE_ORDER,
+    CONTEXT,
+    createIntlHashBracketRegex,
+    createIntlHashDotRegex,
+    ENUM_MEMBER_RE,
+    FUNC_CALL_RE,
+    IDENT_ASSIGN_RE,
+    JS_RESERVED_KEYWORDS,
+    NOISE_STRINGS,
+    PROP_ASSIGN_RE,
+    STORE_NAME_RE,
+    STRING_LITERAL_RE,
+} from "./constants";
 import { compareByAnchorType, countModuleMatchesFast, getIntlKeyFromHash, getModuleSource, parseRegex, scanSingleOccurrences } from "./utils";
 
 function findModules(findStr: string, findRegex: RegExp | null, limit: number): FindModuleMatch[] {
@@ -41,7 +54,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
             rule: "unboundedGap",
             severity: "error",
             detail: `"${m[0]}" at ${m.index}, use .{0,N}`,
-            location: pattern.substring(Math.max(0, m.index - 15), m.index + m[0].length + 15)
+            location: pattern.substring(Math.max(0, m.index - 15), m.index + m[0].length + 15),
         });
     }
 
@@ -53,7 +66,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
                 rule: "excessiveRange",
                 severity: upper > 500 ? "error" : "warning",
                 detail: `.{${m[1]},${m[2]}} spans ${upper} chars, tighten anchors`,
-                location: pattern.substring(Math.max(0, m.index - 15), m.index + m[0].length + 15)
+                location: pattern.substring(Math.max(0, m.index - 15), m.index + m[0].length + 15),
             });
         }
     }
@@ -66,7 +79,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
                 rule: "unboundedLookbehind",
                 severity: "error",
                 detail: "Lookbehind has unbounded .+?/.*?, slow and fragile",
-                location: m[0].slice(0, 80)
+                location: m[0].slice(0, 80),
             });
         }
         if (/\.\{\d+,(\d+)\}/.test(content)) {
@@ -76,7 +89,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
                     rule: "largeLookbehind",
                     severity: "warning",
                     detail: `Lookbehind .{0,${rangeMatch[1]}} is slow, keep short`,
-                    location: m[0].slice(0, 80)
+                    location: m[0].slice(0, 80),
                 });
             }
         }
@@ -90,7 +103,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
         warnings.push({
             rule: "tooManyCaptures",
             severity: "warning",
-            detail: `${captures} captures, max 3`
+            detail: `${captures} captures, max 3`,
         });
     }
 
@@ -103,7 +116,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
                 rule: "isolatedMinifiedChain",
                 severity: "warning",
                 detail: "\\i\\.\\i alone is fragile, add stable anchors",
-                location: pattern.substring(Math.max(0, m.index - 10), m.index + m[0].length + 10)
+                location: pattern.substring(Math.max(0, m.index - 10), m.index + m[0].length + 10),
             });
         }
     }
@@ -112,7 +125,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
         warnings.push({
             rule: "longPattern",
             severity: "info",
-            detail: `${pattern.length} chars, consider simplifying`
+            detail: `${pattern.length} chars, consider simplifying`,
         });
     }
 
@@ -129,7 +142,7 @@ function validateReplace(replaceStr: string, captureCount: number): RegexWarning
             warnings.push({
                 rule: "invalidCaptureRef",
                 severity: "error",
-                detail: `$${ref} but only ${captureCount} capture${captureCount !== 1 ? "s" : ""}`
+                detail: `$${ref} but only ${captureCount} capture${captureCount !== 1 ? "s" : ""}`,
             });
         }
     }
@@ -147,10 +160,12 @@ function diagnoseMatchFailure(source: string, regex: RegExp): MatchDiagnostic {
                 const details = ranges.map(r => `.{${r[1]},${r[2]}}`).join(", ");
                 return {
                     reason: "Range too narrow",
-                    suggestion: `Widen ${details}`
+                    suggestion: `Widen ${details}`,
                 };
             }
-        } catch { /* */ }
+        } catch {
+            /* */
+        }
     }
 
     const lookbehindRe = /\(\?<[!=](?:[^()]*|\((?:[^()]*|\([^()]*\))*\))*\)/g;
@@ -160,10 +175,12 @@ function diagnoseMatchFailure(source: string, regex: RegExp): MatchDiagnostic {
             if (new RegExp(withoutLookbehind, regex.flags).test(source)) {
                 return {
                     reason: "Lookbehind prevents match",
-                    suggestion: "Check context before match target"
+                    suggestion: "Check context before match target",
                 };
             }
-        } catch { /* */ }
+        } catch {
+            /* */
+        }
     }
 
     const lookaheadRe = /\(\?[=!](?:[^()]*|\((?:[^()]*|\([^()]*\))*\))*\)/g;
@@ -173,10 +190,12 @@ function diagnoseMatchFailure(source: string, regex: RegExp): MatchDiagnostic {
             if (new RegExp(withoutLookahead, regex.flags).test(source)) {
                 return {
                     reason: "Lookahead prevents match",
-                    suggestion: "Check context after match target"
+                    suggestion: "Check context after match target",
                 };
             }
-        } catch { /* */ }
+        } catch {
+            /* */
+        }
     }
 
     const literals = src
@@ -196,13 +215,13 @@ function diagnoseMatchFailure(source: string, regex: RegExp): MatchDiagnostic {
         return {
             reason: "Literal fragments not in module",
             partialMatch: found.length ? `Found: ${found.slice(0, 3).join(", ")}` : undefined,
-            suggestion: `Missing: ${missing.slice(0, 3).join(", ")}`
+            suggestion: `Missing: ${missing.slice(0, 3).join(", ")}`,
         };
     }
 
     return {
         reason: "Pattern does not match source",
-        suggestion: "Use findContext to rebuild match"
+        suggestion: "Use findContext to rebuild match",
     };
 }
 
@@ -249,11 +268,14 @@ function discoverAnchors(source: string, centerIdx: number, radius: number): Anc
 
     const anchorScans: Array<{ regex: RegExp; extract: (m: RegExpExecArray) => { find: string; search: string; type: string } | null }> = [
         { regex: STORE_NAME_RE(), extract: m => ({ find: `="${m[1]}"`, search: `="${m[1]}"`, type: "storeName" }) },
-        { regex: STRING_LITERAL_RE(), extract: m => {
-            if (NOISE_STRINGS.has(m[1]) || !/^[a-zA-Z][a-zA-Z0-9_./ -]{4,}$/.test(m[1])) return null;
-            return { find: m[1], search: `"${m[1]}"`, type: m[1].includes(" ") ? "errorString" : "string" };
-        } },
-        { regex: FUNC_CALL_RE(), extract: m => JS_RESERVED_KEYWORDS.has(m[1]) ? null : { find: `.${m[1]}(`, search: `.${m[1]}(`, type: "funcCall" } },
+        {
+            regex: STRING_LITERAL_RE(),
+            extract: m => {
+                if (NOISE_STRINGS.has(m[1]) || !/^[a-zA-Z][a-zA-Z0-9_./ -]{4,}$/.test(m[1])) return null;
+                return { find: m[1], search: `"${m[1]}"`, type: m[1].includes(" ") ? "errorString" : "string" };
+            },
+        },
+        { regex: FUNC_CALL_RE(), extract: m => (JS_RESERVED_KEYWORDS.has(m[1]) ? null : { find: `.${m[1]}(`, search: `.${m[1]}(`, type: "funcCall" }) },
         { regex: ENUM_MEMBER_RE(), extract: m => ({ find: `.${m[1]}`, search: `.${m[1]}`, type: "enum" }) },
         { regex: IDENT_ASSIGN_RE(), extract: m => ({ find: m[1], search: m[1], type: "ident" }) },
         { regex: PROP_ASSIGN_RE(), extract: m => ({ find: `${m[1]}:`, search: `${m[1]}:`, type: "prop" }) },
@@ -373,7 +395,8 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
                 if (!combos.length) {
                     for (let i = 0; i < nearbyAnchors.length && combos.length < 3; i++) {
                         for (let j = i + 1; j < nearbyAnchors.length; j++) {
-                            const a = nearbyAnchors[i], b = nearbyAnchors[j];
+                            const a = nearbyAnchors[i],
+                                b = nearbyAnchors[j];
                             const aSearch = a.anchor.startsWith("#{intl::") ? canonicalizeMatch(a.anchor) : a.anchor.replace(/^"|"$/g, "");
                             const bSearch = b.anchor.startsWith("#{intl::") ? canonicalizeMatch(b.anchor) : b.anchor.replace(/^"|"$/g, "");
                             const combined = aSearch + "," + bSearch;
