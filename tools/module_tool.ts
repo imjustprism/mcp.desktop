@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { loadLazyChunks } from "@debug/loadLazyChunks";
 import { canonicalizeMatch } from "@utils/patches";
-import { loadLazyChunks } from "debug/loadLazyChunks";
 
 import { AnchorCandidate, CompEntry, ModuleMatch, ModuleToolArgs, ModuleWatch, SuggestCandidate, ToolResult, WebpackExport, WebpackModule } from "../types";
-import { DesignTokensModule, Flux, factoryListeners, filters, getCommonModules, UIBarrelModule, wreq } from "../webpack";
+import { DesignTokensModule, factoryListeners, filters, Flux, getCommonModules, UIBarrelModule, wreq } from "../webpack";
 import {
     ANCHOR_TYPE_ORDER,
     CONTEXT,
@@ -18,34 +18,14 @@ import {
     FUNC_CALL_RE,
     ICON_DETECT_RE,
     IDENT_ASSIGN_RE,
+    JS_RESERVED_KEYWORDS,
     LIMITS,
     MANA_COMPONENT_SINGLE_RE,
     NOISE_STRINGS,
     STORE_NAME_RE,
     STRING_LITERAL_RE,
 } from "./constants";
-import {
-    clearBatchResultsCache,
-    clearComponentIndexCache,
-    clearCSSIndexCache,
-    clearModuleSourceCache,
-    compareByAnchorType,
-    countModuleMatchesFast,
-    extractModule,
-    extractPropsFromFunction,
-    getComponentIndex,
-    getCSSIndex,
-    getCSSModuleStats,
-    getIntlKeyFromHash,
-    getModulePatchedBy,
-    getModuleSource,
-    invalidateModuleIdCache,
-    isRenderedClassName,
-    moduleWatchState,
-    parseRegex,
-    scanSingleOccurrences,
-    searchModulesOptimized,
-} from "./utils";
+import * as u from "./utils";
 
 function findModulesWithIds(filter: (m: unknown) => boolean, max: number): ModuleMatch[] {
     const results: ModuleMatch[] = [];
@@ -70,22 +50,22 @@ function findModulesWithIds(filter: (m: unknown) => boolean, max: number): Modul
 
 export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult> {
     const { action, id, props, code, displayName, className, exportName, exportValue, pattern } = args;
+    if (args.limit === 0) return { error: true, message: "limit must be >= 1 (omit for default)" };
+    if (args.maxLength === 0) return { error: true, message: "maxLength must be >= 1 (omit for default)" };
     const limit = args.limit ?? 20;
     const maxLength = Math.min(args.maxLength ?? 50000, 100000);
 
-    if (action === "stats" || (!action && !id && !props && !code && !displayName && !className && !exportName && !exportValue && !pattern)) {
-        const totalModules = Object.keys(wreq.m).length;
+    const hasSearchArg = id || props || code || displayName || className || exportName || exportValue || pattern;
+
+    if (action === "stats" || (!action && !hasSearchArg)) {
+        const moduleIds = Object.keys(wreq.m);
         const loadedModules = Object.keys(wreq.c).length;
-        let patchedCount = 0;
-        for (const moduleId of Object.keys(wreq.m)) {
-            if (getModulePatchedBy(moduleId).length) patchedCount++;
-        }
         return {
-            totalModules,
+            totalModules: moduleIds.length,
             loadedModules,
-            patchedModules: patchedCount,
+            patchedModules: moduleIds.filter(mid => u.getModulePatchedBy(mid).length).length,
             stores: Flux.Store.getAll().length,
-            loadedPercentage: Math.round((loadedModules / totalModules) * 100),
+            loadedPercentage: Math.round((loadedModules / moduleIds.length) * 100),
         };
     }
 
@@ -94,12 +74,53 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         return { total: Object.keys(wreq.m).length, ids };
     }
 
+    if (action === "patchedList") {
+        const patched = Object.keys(wreq.m)
+            .map(mid => ({ id: mid, patchedBy: u.getModulePatchedBy(mid), size: u.getModuleSource(mid).length }))
+            .filter(p => p.patchedBy.length)
+            .sort((a, b) => b.patchedBy.length - a.patchedBy.length);
+        const pluginCounts = new Map<string, number>();
+        for (const p of patched) for (const name of p.patchedBy) pluginCounts.set(name, (pluginCounts.get(name) ?? 0) + 1);
+        const topPlugins = [...pluginCounts.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 20)
+            .map(([name, modules]) => ({ name, modules }));
+        return { totalPatched: patched.length, topPlugins, modules: patched.slice(0, limit) };
+    }
+
+    if (action === "findFactory") {
+        if (!pattern) return u.missingArg("pattern");
+        let regex: RegExp | null;
+        try {
+            regex = u.parseRegex(pattern);
+        } catch {
+            return { error: true, message: `Invalid regex: ${pattern}` };
+        }
+        const canon = regex ? canonicalizeMatch(regex) : canonicalizeMatch(pattern);
+        const matcher = (src: string) => typeof canon === "string" ? src.includes(canon) : canon.test(src);
+        const locate = (src: string) => typeof canon === "string" ? src.indexOf(canon) : src.search(canon);
+        const matchLen = (src: string) => typeof canon === "string" ? canon.length : (src.match(canon)?.[0].length ?? 0);
+
+        const matchingIds: string[] = [];
+        for (const moduleId of Object.keys(wreq.m)) {
+            if (matchingIds.length >= limit) break;
+            if (matcher(String(wreq.m[moduleId]))) matchingIds.push(moduleId);
+        }
+        const unique = matchingIds.length === 1;
+        const snippets = matchingIds.slice(0, 5).map(mid => {
+            const source = String(wreq.m[mid]);
+            const idx = locate(source);
+            return { id: mid, hint: u.getModuleHint(mid), size: source.length, snippet: source.slice(Math.max(0, idx - 60), Math.min(source.length, idx + matchLen(source) + 120)) };
+        });
+        return { pattern, count: matchingIds.length, unique, moduleIds: matchingIds.slice(0, 10), snippets, verdict: unique ? "UNIQUE" : matchingIds.length === 0 ? "NO_MATCH" : "NOT_UNIQUE" };
+    }
+
     if (action === "loadLazy") {
-        if (moduleWatchState.isLoadingLazy) return { error: true, message: "Lazy load already in progress" };
+        if (u.moduleWatchState.isLoadingLazy) return { error: true, message: "Lazy load already in progress" };
 
         const modulesBefore = Object.keys(wreq.m).length;
         const loadedBefore = Object.keys(wreq.c).length;
-        moduleWatchState.isLoadingLazy = true;
+        u.moduleWatchState.isLoadingLazy = true;
 
         try {
             await loadLazyChunks();
@@ -108,13 +129,13 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             const newModules = modulesAfter - modulesBefore;
             const newLoaded = loadedAfter - loadedBefore;
 
-            invalidateModuleIdCache();
-            clearModuleSourceCache();
-            clearBatchResultsCache();
-            clearCSSIndexCache();
-            clearComponentIndexCache();
+            u.invalidateModuleIdCache();
+            u.clearModuleSourceCache();
+            u.clearBatchResultsCache();
+            u.clearCSSIndexCache();
+            u.clearComponentIndexCache();
 
-            moduleWatchState.lastLazyLoadResult = { loadedAt: Date.now(), modulesBefore, modulesAfter, newModules };
+            u.moduleWatchState.lastLazyLoadResult = { loadedAt: Date.now(), modulesBefore, modulesAfter, newModules };
 
             return {
                 success: true,
@@ -127,16 +148,23 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 message: newModules > 0 ? `Loaded ${newModules} factories, ${newLoaded} instances` : "Lazy chunks already loaded",
             };
         } finally {
-            moduleWatchState.isLoadingLazy = false;
+            u.moduleWatchState.isLoadingLazy = false;
         }
     }
 
     if (action === "watch") {
-        const duration = Math.min(Math.max(args.duration ?? 30000, 5000), 120000);
+        const duration = u.clamp(args.duration, 30000, 5000, 120000);
         const maxCaptures = Math.min(args.maxCaptures ?? 100, 500);
-        const filterRegex = args.filter ? (parseRegex(args.filter) ?? new RegExp(args.filter, "i")) : null;
+        let filterRegex: RegExp | null = null;
+        if (args.filter) {
+            filterRegex = u.parseRegex(args.filter) ?? u.compileFilterRegex(args.filter);
+            if (!filterRegex) {
+                u.mcpLogger.warn(`module watch: invalid filter regex "${args.filter}"`);
+                return { error: true, message: `Invalid filter regex: ${args.filter}` };
+            }
+        }
 
-        const watchId = moduleWatchState.nextId++;
+        const watchId = u.moduleWatchState.nextId++;
         const now = Date.now();
         const baselineCount = Object.keys(wreq.m).length;
         const seenModules = new Set(Object.keys(wreq.m));
@@ -160,12 +188,13 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 const source = String(wreq.m[modId]);
                 if (filterRegex && !filterRegex.test(source)) continue;
                 watch.newModules.push({ id: modId, ts: Date.now(), size: source.length });
+                if (watch.newModules.length >= watch.maxCaptures) return;
             }
         };
 
         watch.listener = listener;
         factoryListeners.add(listener);
-        moduleWatchState.active.set(watchId, watch);
+        u.moduleWatchState.active.set(watchId, watch);
 
         return { id: watchId, filter: args.filter ?? "*", duration, maxCaptures, baselineCount };
     }
@@ -174,17 +203,17 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const { watchId } = args;
 
         if (watchId === undefined) {
-            const watches = [...moduleWatchState.active.values()].map(w => ({
+            const watches = [...u.moduleWatchState.active.values()].map(w => ({
                 id: w.id,
                 filter: w.filter?.source ?? "*",
                 newModuleCount: w.newModules.length,
                 elapsed: Date.now() - w.startedAt,
                 remaining: Math.max(0, w.expiresAt - Date.now()),
             }));
-            return { activeWatches: watches.length, watches, lastLazyLoad: moduleWatchState.lastLazyLoadResult };
+            return { activeWatches: watches.length, watches, lastLazyLoad: u.moduleWatchState.lastLazyLoadResult };
         }
 
-        const watch = moduleWatchState.active.get(watchId);
+        const watch = u.moduleWatchState.active.get(watchId);
         if (!watch) return { error: true, message: `Watch ${watchId} not found or expired` };
 
         const truncated = watch.newModules.length > 50;
@@ -201,40 +230,169 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const { watchId } = args;
 
         if (watchId === undefined) {
-            const count = moduleWatchState.active.size;
-            for (const [wid, w] of moduleWatchState.active) {
+            const count = u.moduleWatchState.active.size;
+            for (const [wid, w] of u.moduleWatchState.active) {
                 if (w.listener) factoryListeners.delete(w.listener);
-                moduleWatchState.active.delete(wid);
+                u.moduleWatchState.active.delete(wid);
             }
             return { stopped: count };
         }
 
-        const watch = moduleWatchState.active.get(watchId);
+        const watch = u.moduleWatchState.active.get(watchId);
         if (!watch) return { error: true, message: `Watch ${watchId} not found` };
 
         const { newModules } = watch;
         if (watch.listener) factoryListeners.delete(watch.listener);
-        moduleWatchState.active.delete(watchId);
+        u.moduleWatchState.active.delete(watchId);
         return { id: watchId, stopped: true, newModuleCount: newModules.length, newModules: newModules.slice(0, 100) };
     }
 
-    if (action === "size" && id) {
-        const source = getModuleSource(id);
-        if (!source) return { found: false, message: `Module ${id} not found` };
+    if (action === "functionAt") {
+        if (!id) return { error: true, message: "id required for functionAt" };
+        if (!pattern) return { error: true, message: "pattern required for functionAt" };
+
+        const source = u.getModuleSource(id);
+        if (!source) return { error: true, message: `Module ${id} not found` };
+
+        const parsed = u.parseRegex(pattern);
+        const searchPattern = parsed ? canonicalizeMatch(parsed) : canonicalizeMatch(pattern);
+        const matchIdx = typeof searchPattern === "string" ? source.indexOf(searchPattern) : source.search(searchPattern);
+        if (matchIdx < 0) return { error: true, message: "Pattern not found in module" };
+
+        let openBrace = -1;
+        let braceCount = 0;
+
+        for (let i = matchIdx; i < source.length && i < matchIdx + 500; i++) {
+            if (source[i] === "{") { openBrace = i; break; }
+            if (source[i] === "}" || source[i] === ";") break;
+        }
+
+        if (openBrace < 0) {
+            braceCount = 0;
+            for (let i = matchIdx; i >= 0; i--) {
+                if (source[i] === "}") braceCount++;
+                else if (source[i] === "{") {
+                    if (braceCount > 0) braceCount--;
+                    else { openBrace = i; break; }
+                }
+            }
+        }
+
+        if (openBrace < 0) return { error: true, message: "Could not find function boundary" };
+
+        let headerStart = openBrace;
+        while (headerStart > 0 && source[headerStart - 1] !== ";" && source[headerStart - 1] !== "}" && source[headerStart - 1] !== "\n" && (openBrace - headerStart) < 200) headerStart--;
+
+        let fnEnd = openBrace + 1;
+        braceCount = 1;
+        while (fnEnd < source.length && braceCount > 0) {
+            const ch = source[fnEnd];
+            if (ch === "{") braceCount++;
+            else if (ch === "}") braceCount--;
+            fnEnd++;
+        }
+
+        const fnSource = source.slice(headerStart, fnEnd);
+        const maxLen = Math.min(maxLength, 20000);
+        return {
+            found: true,
+            id,
+            patternIndex: matchIdx,
+            functionStart: headerStart,
+            functionEnd: fnEnd,
+            functionLength: fnEnd - headerStart,
+            truncated: fnSource.length > maxLen,
+            source: fnSource.slice(0, maxLen),
+        };
+    }
+
+    if (action === "structure") {
+        if (!id) return u.missingArg("id");
+        const source = u.getModuleSource(id);
+        if (!source) return { error: true, message: `Module ${id} not found` };
+
+        const functions: Array<{ name: string; pos: number; params?: string }> = [];
+        const classes: Array<{ name: string; pos: number; extends?: string }> = [];
+        const strings: string[] = [];
+        const assignments: Array<{ name: string; pos: number }> = [];
+
+        const fnRe = /\bfunction\s+([a-zA-Z_$][\w$]*)\s*\(([^)]{0,80})\)/g;
+        let m: RegExpExecArray | null;
+        while ((m = fnRe.exec(source)) && functions.length < 50) {
+            if (!JS_RESERVED_KEYWORDS.has(m[1])) functions.push({ name: m[1], pos: m.index, params: m[2] || undefined });
+        }
+
+        const classRe = /\bclass\s+([a-zA-Z_$][\w$]*)(?:\s+extends\s+([a-zA-Z_$][\w$.]*))?\s*\{/g;
+        while ((m = classRe.exec(source)) && classes.length < 20) classes.push({ name: m[1], pos: m.index, extends: m[2] || undefined });
+
+        const methodRe = /(?:^|[;{}])([a-zA-Z_$][\w$]*)\s*\(([^)]{0,60})\)\s*\{/gm;
+        while ((m = methodRe.exec(source)) && functions.length < 80) {
+            if (!JS_RESERVED_KEYWORDS.has(m[1]) && !functions.some(f => f.name === m![1])) functions.push({ name: m[1], pos: m.index, params: m[2] || undefined });
+        }
+
+        const strRe = /"([^"\\]{4,60})"/g;
+        const strSeen = new Set<string>();
+        const intlHashRe = /^[A-Za-z0-9+/]{6}$/;
+        while ((m = strRe.exec(source)) && strings.length < 30) {
+            const s = m[1];
+            if (strSeen.has(s) || /^[a-z]{1,2}$/.test(s)) continue;
+            if (/\(0,\w/.test(s) || /\)\s*[?:,]/.test(s) || /jsx\(/.test(s) || /\.\w\.\w\.\w/.test(s)) continue;
+            if (intlHashRe.test(s)) {
+                const key = u.getIntlKeyFromHash(s);
+                if (key) { strSeen.add(s); strings.push(`#{intl::${key}}`); continue; }
+                const before = source.slice(Math.max(0, m.index - 5), m.index);
+                if (before.endsWith(".t[")) { strSeen.add(s); strings.push(`#{intl::${s}::raw}`); continue; }
+                continue;
+            }
+            strSeen.add(s);
+            strings.push(s);
+        }
+
+        const assignRe = /(?:let|const|var)\s+([a-zA-Z_$][\w$]{2,})(?:\s*=)/g;
+        while ((m = assignRe.exec(source)) && assignments.length < 30) assignments.push({ name: m[1], pos: m.index });
+
+        const mod = wreq.c[id] as WebpackModule | undefined;
+        let exportKeys: string[] = [];
+        try {
+            if (mod?.exports && typeof mod.exports === "object") exportKeys = Object.keys(mod.exports).slice(0, 30);
+        } catch { /* exports proxy may throw on enumeration */ }
+        const hint = u.getModuleHint(id);
+        const patchedBy = u.getModulePatchedBy(id);
+
+        functions.sort((a, b) => a.pos - b.pos);
+
+        return {
+            id,
+            hint,
+            size: source.length,
+            patchedBy: patchedBy.length ? patchedBy : undefined,
+            exportKeys,
+            classes: classes.length ? classes : undefined,
+            functions: functions.slice(0, 50),
+            keyStrings: strings.length ? strings : undefined,
+            variables: assignments.length ? assignments.slice(0, 20).map(a => a.name) : undefined,
+        };
+    }
+
+    if (action === "size") {
+        if (!id) return u.missingArg("id");
+        const source = u.getModuleSource(id);
+        if (!source) return { error: true, message: `Module ${id} not found` };
         return { id, size: source.length, sizeKB: Math.round((source.length / 1024) * 10) / 10 };
     }
 
     if ((action === "extract" || (!action && id)) && id) {
         if (!wreq.m[id]) return { error: true, message: `Module ${id} not found` };
         const patched = args.patched !== false;
-        const source = extractModule(id, patched);
-        const patchedBy = getModulePatchedBy(id);
+        const source = u.extractModule(id, patched);
+        const patchedBy = u.getModulePatchedBy(id);
         return { id, patched: patchedBy.length > 0, patchedBy, size: source.length, truncated: source.length > maxLength, source: source.slice(0, maxLength) };
     }
 
-    if (action === "exports" && id) {
+    if (action === "exports") {
+        if (!id) return u.missingArg("id");
         const mod = wreq.c[id] as WebpackModule | undefined;
-        if (!mod?.exports) return { found: false, message: `Module ${id} not loaded` };
+        if (!mod?.exports) return { error: true, message: `Module ${id} not loaded` };
 
         const exp = mod.exports;
         const exports: Record<string, { type: string; displayName?: string; preview?: string }> = {};
@@ -242,38 +400,53 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         for (const key of Object.keys(exp)) {
             const val = exp[key] as WebpackExport | null | undefined;
             const type = typeof val;
-            const entry: { type: string; displayName?: string; preview?: string } = { type };
+            const entry: { type: string; displayName?: string; preview?: string; signature?: string } = { type };
             if (val?.displayName) entry.displayName = val.displayName;
-            if (type === "function") entry.preview = (val as unknown as () => void).toString().slice(0, 100);
-            else if (type === "object" && val) entry.preview = Object.keys(val).slice(0, 10).join(", ");
-            else if (type === "string") entry.preview = (val as unknown as string).slice(0, 50);
+            if (type === "function") {
+                const fnStr = (val as any as () => void).toString();
+                const sigMatch = fnStr.match(/^(?:function\s*\w*|(?:\w+\s*=>)|\([\s\S]*?\)\s*(?:=>)?)/);
+                entry.signature = sigMatch?.[0]?.slice(0, 120) ?? fnStr.slice(0, 60);
+                entry.preview = fnStr.slice(0, 120);
+            } else if (type === "object" && val) entry.preview = Object.keys(val).slice(0, 10).join(", ");
+            else if (type === "string") entry.preview = (val as any as string).slice(0, 50);
             exports[key] = entry;
         }
 
-        return { found: true, id, hasDefault: "default" in exp, exportCount: Object.keys(exp).length, exports };
+        const patchedBy = u.getModulePatchedBy(id);
+        return { found: true, id, hint: u.getModuleHint(id), patchedBy: patchedBy.length ? patchedBy : undefined, hasDefault: "default" in exp, exportCount: Object.keys(exp).length, exports };
     }
 
-    if (action === "context" && id && pattern) {
+    if (action === "context") {
+        if (!id) return u.missingArg("id");
+        if (!pattern) return u.missingArg("pattern");
         const chars = args.chars ?? 100;
-        const source = getModuleSource(id);
-        if (!source) return { found: false, message: `Module ${id} not found` };
+        const source = u.getModuleSource(id);
+        if (!source) return { error: true, message: `Module ${id} not found` };
 
-        const parsed = parseRegex(pattern);
+        const parsed = u.parseRegex(pattern);
         const searchPattern = parsed ? canonicalizeMatch(parsed) : new RegExp(canonicalizeMatch(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
         const match = source.match(searchPattern);
-        if (!match?.index) return { found: false, pattern, message: "Pattern not found in module" };
+        if (match?.index == null) return { found: false, pattern, message: "Pattern not found in module" };
 
         const start = Math.max(0, match.index - chars);
         const end = Math.min(source.length, match.index + match[0].length + chars);
-        return { found: true, moduleId: id, matchIndex: match.index, matchLength: match[0].length, context: source.slice(start, end), matchedText: match[0] };
+        let context = source.slice(start, end);
+        const intlAnnotations: Array<{ hash: string; key: string }> = [];
+        context = context.replace(/\.t\.([A-Za-z0-9+/]{6})/g, (full, hash: string) => {
+            const key = u.getIntlKeyFromHash(hash);
+            if (key) { intlAnnotations.push({ hash, key }); return `.t./*${key}*/`; }
+            return full;
+        });
+        return { found: true, moduleId: id, hint: u.getModuleHint(id), matchIndex: match.index, matchLength: match[0].length, context, matchedText: match[0], intlAnnotations: intlAnnotations.length ? intlAnnotations : undefined };
     }
 
-    if (action === "diff" && id) {
-        const original = getModuleSource(id);
-        if (!original) return { found: false, message: `Module ${id} not found` };
+    if (action === "diff") {
+        if (!id) return u.missingArg("id");
+        const original = u.getModuleSource(id);
+        if (!original) return { error: true, message: `Module ${id} not found` };
 
-        const patched = extractModule(id, true);
-        const patchedBy = getModulePatchedBy(id);
+        const patched = u.extractModule(id, true);
+        const patchedBy = u.getModulePatchedBy(id);
         if (!patchedBy.length) return { id, patched: false };
 
         const patchedClean = patched.startsWith("//") ? patched.slice(patched.indexOf("\n") + 1) : patched;
@@ -335,9 +508,10 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         return { found: true, id, hasPatches: true, patchedBy, originalSize: original.length, patchedSize: patchedClean.length, changeCount: changes.length, changes };
     }
 
-    if (action === "deps" && id) {
-        const source = getModuleSource(id);
-        if (!source) return { found: false, message: `Module ${id} not found` };
+    if (action === "deps") {
+        if (!id) return u.missingArg("id");
+        const source = u.getModuleSource(id);
+        if (!source) return { error: true, message: `Module ${id} not found` };
 
         const deps = new Set<string>();
         let depMatch: RegExpExecArray | null;
@@ -345,6 +519,22 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         while ((depMatch = depPattern.exec(source))) deps.add(depMatch[1]);
 
         return { found: true, id, dependencyCount: deps.size, dependencies: [...deps].sort((a, b) => Number(a) - Number(b)) };
+    }
+
+    if (action === "whereUsed") {
+        if (!id) return { error: true, message: "id required for whereUsed" };
+        if (!wreq.m[id]) return { error: true, message: `Module ${id} not found` };
+        const depPattern = new RegExp(`\\b\\w\\(${id}\\)`, "g");
+        const importers: Array<{ id: string; count: number }> = [];
+        for (const moduleId of Object.keys(wreq.m)) {
+            if (moduleId === id) continue;
+            const source = u.getModuleSource(moduleId);
+            const matches = source.match(depPattern);
+            if (matches) importers.push({ id: moduleId, count: matches.length });
+            if (importers.length >= limit) break;
+        }
+        importers.sort((a, b) => b.count - a.count);
+        return { found: true, id, importerCount: importers.length, importers };
     }
 
     if (props?.length) {
@@ -359,6 +549,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 modules: mods.map((m, i) => ({
                     index: i,
                     moduleId: m.id,
+                    hint: u.getModuleHint(m.id),
                     exportKey: m.key,
                     type: typeof m.exports,
                     keys: typeof m.exports === "object" && m.exports ? Object.keys(m.exports).slice(0, 30) : undefined,
@@ -380,6 +571,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         return {
             found: true,
             moduleId: m.id,
+            hint: u.getModuleHint(m.id),
             exportKey: m.key,
             keys: Object.keys(mod),
             sample: Object.fromEntries(
@@ -397,13 +589,16 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             const str = Function.prototype.toString.call(m);
             return parsedCode.every(c => str.includes(c));
         };
+        interface WrappedComponent { $$typeof?: symbol; type?: unknown; render?: unknown }
         const filter = (m: unknown) => {
-            let inner = m;
+            let inner: unknown = m;
             while (inner != null) {
                 if (byCode(inner)) return true;
-                if (!(inner as any).$$typeof) return false;
-                if ((inner as any).type) inner = (inner as any).type;
-                else if ((inner as any).render) inner = (inner as any).render;
+                if (typeof inner !== "object" && typeof inner !== "function") return false;
+                const w = inner as WrappedComponent;
+                if (!w.$$typeof) return false;
+                if (w.type != null) inner = w.type;
+                else if (w.render != null) inner = w.render;
                 else return false;
             }
             return false;
@@ -418,6 +613,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 modules: mods.map((m, i) => ({
                     index: i,
                     moduleId: m.id,
+                    hint: u.getModuleHint(m.id),
                     exportKey: m.key,
                     type: typeof m.exports,
                     source: typeof m.exports === "function" ? (m.exports as Function).toString().slice(0, 200) : undefined,
@@ -426,8 +622,9 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             };
         }
         const m = mods[0];
-        if (typeof m.exports === "function") return { found: true, moduleId: m.id, exportKey: m.key, type: "function", source: (m.exports as Function).toString().slice(0, 5000) };
-        return { found: true, moduleId: m.id, exportKey: m.key, type: typeof m.exports, keys: Object.keys(m.exports as object) };
+        const hint = u.getModuleHint(m.id);
+        if (typeof m.exports === "function") return { found: true, moduleId: m.id, hint, exportKey: m.key, type: "function", source: (m.exports as Function).toString().slice(0, 5000) };
+        return { found: true, moduleId: m.id, hint, exportKey: m.key, type: typeof m.exports, keys: Object.keys(m.exports as object) };
     }
 
     if (displayName) {
@@ -467,7 +664,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     }
 
     if (action === "components") {
-        const idx = getComponentIndex();
+        const idx = u.getComponentIndex();
 
         if (id) {
             const mod = wreq.c[id] as WebpackModule | undefined;
@@ -486,7 +683,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 }
                 const entry: CompEntry = { key };
                 if (fn.displayName) entry.displayName = fn.displayName;
-                const props = extractPropsFromFunction(fn);
+                const props = u.extractPropsFromFunction(fn);
                 if (props.length) entry.props = props;
                 const manaMatch = src.match(MANA_COMPONENT_SINGLE_RE);
                 if (manaMatch) entry.manaType = manaMatch[1];
@@ -567,7 +764,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
 
     if (action === "css") {
         if (className) {
-            const { index, modules } = getCSSIndex();
+            const { index, modules } = u.getCSSIndex();
             const lower = className.toLowerCase();
             const matches: Array<{ moduleId: string; hash: string; classCount: number; matchingClasses: Record<string, string> }> = [];
 
@@ -585,7 +782,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             return { totalIndexed: index.size, count: matches.length, matches };
         }
 
-        const stats = getCSSModuleStats();
+        const stats = u.getCSSModuleStats();
 
         const tokenInfo: Record<string, unknown> = {};
         if (DesignTokensModule) {
@@ -602,8 +799,8 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
     }
 
     if (className) {
-        if (isRenderedClassName(className)) {
-            const { index, modules } = getCSSIndex();
+        if (u.isRenderedClassName(className)) {
+            const { index, modules } = u.getCSSIndex();
             const entry = index.get(className);
             if (entry) {
                 const modInfo = modules.get(entry.moduleId);
@@ -734,20 +931,21 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const matches = mods.map(m => {
             const obj = m.exports as Record<string, unknown>;
             const keys = Object.keys(obj);
-            return { moduleId: m.id, keys: keys.slice(0, 20), matchingKeys: keys.filter(k => obj[k] === exportValue) };
+            return { moduleId: m.id, hint: u.getModuleHint(m.id), keys: keys.slice(0, 20), matchingKeys: keys.filter(k => obj[k] === exportValue) };
         });
 
         return { value: exportValue, valueType: typeof exportValue, count: mods.length, matches };
     }
 
-    if (action === "annotate" && id) {
-        let source = args.patched !== false ? extractModule(id, true) : getModuleSource(id);
+    if (action === "annotate") {
+        if (!id) return u.missingArg("id");
+        let source = args.patched !== false ? u.extractModule(id, true) : u.getModuleSource(id);
         if (!source) return { error: true, message: `Module ${id} not found` };
 
         const annotations: Array<{ hash: string; key: string }> = [];
         for (const regex of [createIntlHashDotRegex(), createIntlHashBracketRegex()]) {
             source = source.replace(regex, (match, hash: string) => {
-                const key = getIntlKeyFromHash(hash);
+                const key = u.getIntlKeyFromHash(hash);
                 if (key) {
                     annotations.push({ hash, key });
                     return `.t[/*${key}*/]`;
@@ -757,10 +955,12 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         }
 
         const maxLen = Math.min(maxLength, CONTEXT.ANNOTATE_MAX_LENGTH);
+        const patchedBy = u.getModulePatchedBy(id);
         return {
             id,
-            patched: args.patched !== false,
-            patchedBy: getModulePatchedBy(id),
+            usedPatchedSource: args.patched !== false,
+            patched: patchedBy.length > 0,
+            patchedBy,
             annotationCount: annotations.length,
             size: source.length,
             truncated: source.length > maxLen,
@@ -768,8 +968,9 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         };
     }
 
-    if (action === "suggest" && id) {
-        const source = getModuleSource(id);
+    if (action === "suggest") {
+        if (!id) return u.missingArg("id");
+        const source = u.getModuleSource(id);
         if (!source) return { error: true, message: `Module ${id} not found` };
 
         const candidates: SuggestCandidate[] = [];
@@ -778,7 +979,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         const addCandidate = (find: string, searchStr: string, type: string, intlKey?: string, unstable?: boolean) => {
             if (seen.has(find) || find.length < LIMITS.MODULE.SUGGEST_MIN_FIND_LEN) return;
             seen.add(find);
-            const count = countModuleMatchesFast(searchStr, 3);
+            const count = u.countModuleMatchesFast(searchStr, 3);
             candidates.push({ find, type, unique: count === 1, moduleCount: count, intlKey, unstable: unstable ? true : undefined });
         };
 
@@ -788,7 +989,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
             let m;
             while ((m = regex.exec(source))) {
                 const hash = m[1];
-                const key = getIntlKeyFromHash(hash);
+                const key = u.getIntlKeyFromHash(hash);
                 const findStr = key ? `#{intl::${key}}` : `#{intl::${hash}::raw}`;
                 const searchStr = canonicalizeMatch(findStr);
                 addCandidate(findStr, searchStr, "intl", key ?? undefined);
@@ -824,7 +1025,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
         ];
 
         for (const { regex, extract } of anchorScans) {
-            for (const anchor of scanSingleOccurrences(source, regex, extract)) {
+            for (const anchor of u.scanSingleOccurrences(source, regex, extract)) {
                 addCandidate(anchor.find, anchor.search, anchor.type);
                 rawAnchors.push(anchor);
             }
@@ -872,7 +1073,7 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
 
         candidates.sort((a, b) => {
             if (a.unstable !== b.unstable) return a.unstable ? 1 : -1;
-            return compareByAnchorType(a, b, ANCHOR_TYPE_ORDER);
+            return u.compareByAnchorType(a, b, ANCHOR_TYPE_ORDER);
         });
 
         const topN = LIMITS.MODULE.SUGGEST_TOP_N;
@@ -895,31 +1096,32 @@ export async function handleModuleTool(args: ModuleToolArgs): Promise<ToolResult
                 if (!result.includes(c)) result.push(c);
             }
         }
-        result.sort((a, b) => compareByAnchorType(a, b, ANCHOR_TYPE_ORDER));
+        result.sort((a, b) => u.compareByAnchorType(a, b, ANCHOR_TYPE_ORDER));
 
         return { id, sourceSize: source.length, candidateCount: candidates.length, suggestions: result.slice(0, topN) };
     }
 
     if (pattern || action === "find") {
         if (!pattern) return { error: true, message: "pattern required for find action" };
-        const parsed = parseRegex(pattern);
+        const parsed = u.parseRegex(pattern);
         const regex = parsed ? canonicalizeMatch(parsed) : null;
         const canonicalized = canonicalizeMatch(pattern);
-        const results = searchModulesOptimized(source => (regex ? regex.test(source) : source.includes(canonicalized)), limit);
+        const results = u.searchModulesOptimized(source => (regex ? regex.test(source) : source.includes(canonicalized)), limit);
 
         return {
             count: results.length,
             ids: results,
             preview: results.map(moduleId => {
-                const source = getModuleSource(moduleId);
+                const source = u.getModuleSource(moduleId);
                 const match = regex ? source.match(regex) : null;
                 const idx = match?.index ?? source.indexOf(canonicalized);
+                const hint = u.getModuleHint(moduleId);
                 if (idx >= 0) {
                     const start = Math.max(0, idx - CONTEXT.SEARCH_SNIPPET);
                     const end = Math.min(source.length, idx + (match?.[0].length ?? canonicalized.length) + CONTEXT.SEARCH_SNIPPET + 100);
-                    return { id: moduleId, snippet: source.slice(start, end) };
+                    return { id: moduleId, hint, snippet: source.slice(start, end) };
                 }
-                return { id: moduleId, snippet: source.slice(0, 200) };
+                return { id: moduleId, hint, snippet: source.slice(0, 200) };
             }),
         };
     }

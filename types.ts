@@ -153,6 +153,7 @@ export interface ServerStatus {
 export interface BatchResult {
     count: number;
     moduleIds: string[];
+    scannedTo: number;
 }
 
 type WebpackExportValue = string | number | boolean | null | undefined | object | ((...args: unknown[]) => unknown);
@@ -322,11 +323,22 @@ export type ReplaceFn = (match: string, ...groups: string[]) => string;
 export interface PluginReplacement {
     match?: string | RegExp;
     replace?: string | ReplaceFn;
+    noWarn?: boolean;
+    predicate?: () => boolean;
+    fromBuild?: number;
+    toBuild?: number;
 }
 
 export interface PluginPatch {
     find: string | RegExp;
     replacement: PluginReplacement | PluginReplacement[];
+    all?: boolean;
+    noWarn?: boolean;
+    group?: boolean;
+    predicate?: () => boolean;
+    fromBuild?: number;
+    toBuild?: number;
+    plugin?: string;
 }
 
 export interface PluginSettings {
@@ -358,8 +370,13 @@ type ModuleAction =
     | "context"
     | "diff"
     | "deps"
+    | "whereUsed"
+    | "functionAt"
+    | "structure"
     | "size"
     | "ids"
+    | "patchedList"
+    | "findFactory"
     | "stats"
     | "loadLazy"
     | "watch"
@@ -369,8 +386,8 @@ type ModuleAction =
     | "annotate"
     | "css"
     | "components";
-type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods";
-type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test" | "unknown";
+type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods" | "snapshot";
+type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test" | "unknown" | "neighbors" | "clearCache";
 type FluxToolAction = "events" | "types" | "dispatch" | "listeners";
 type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "benchmark" | "compare" | "slowscan" | "conflicts" | "diff" | "broken";
 
@@ -406,7 +423,8 @@ type DiscordAction =
     | "experiments"
     | "platform"
     | "tokens"
-    | "icons";
+    | "icons"
+    | "buildInfo";
 type TraceAction = "events" | "handlers" | "storeEvents" | "start" | "get" | "stop" | "store";
 type InterceptAction = "set" | "get" | "stop";
 type PluginAction = "list" | "enable" | "disable" | "toggle" | "settings" | "setSetting";
@@ -460,7 +478,7 @@ export interface IntlToolArgs extends BaseToolArgs {
     parts?: Record<string, string[]>;
 }
 
-export interface FluxToolArgs {
+export interface FluxToolArgs extends BaseToolArgs {
     action?: FluxToolAction;
     event?: string;
     type?: string;
@@ -537,6 +555,7 @@ export interface InterceptToolArgs {
 
 export interface SearchToolArgs extends BaseToolArgs {
     pattern?: string;
+    patterns?: string[];
     regex?: boolean;
 }
 

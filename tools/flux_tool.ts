@@ -7,28 +7,32 @@
 import { FluxToolArgs } from "../types";
 import { FluxDispatcher, getFluxDispatcherInternal } from "../webpack";
 import { LIMITS } from "./constants";
+import * as u from "./utils";
 
 export async function handleFluxTool(args: FluxToolArgs): Promise<unknown> {
     const { action, event, type, payload, filter: filterPattern } = args;
+    const limit = u.clamp(args.limit, LIMITS.FLUX.SLICE, 1, 1000);
 
     const dispatcher = getFluxDispatcherInternal();
 
     if (action === "dispatch") {
-        if (!type) return { error: true, message: "type required for dispatch" };
-        FluxDispatcher.dispatch({ type, ...payload });
+        if (!type) return u.missingArg("type");
+        FluxDispatcher.dispatch({ ...payload, type });
         return { dispatched: true, type };
     }
 
     if (action === "listeners") {
-        if (!event) return { error: true, message: "event required for listeners" };
+        if (!event) return u.missingArg("event");
 
         const storeHandlers: string[] = [];
+        const seen = new Set<string>();
         const nodes = dispatcher._actionHandlers?._dependencyGraph?.nodes;
 
         if (nodes) {
             for (const nodeId in nodes) {
                 if (nodes[nodeId].actionHandler?.[event]) {
-                    storeHandlers.push(nodes[nodeId].name ?? nodeId);
+                    const name = nodes[nodeId].name ?? nodeId;
+                    if (!seen.has(name)) { seen.add(name); storeHandlers.push(name); }
                 }
             }
         }
@@ -37,7 +41,7 @@ export async function handleFluxTool(args: FluxToolArgs): Promise<unknown> {
         if (orderedHandlers) {
             for (const h of orderedHandlers) {
                 const name = h.name ?? "anonymous";
-                if (!storeHandlers.includes(name)) storeHandlers.push(name);
+                if (!seen.has(name)) { seen.add(name); storeHandlers.push(name); }
             }
         }
 
@@ -48,35 +52,31 @@ export async function handleFluxTool(args: FluxToolArgs): Promise<unknown> {
             return { error: true, message: `No handlers for event: ${event}` };
         }
 
-        return { found: true, event, storeHandlerCount: storeHandlers.length, storeHandlers: storeHandlers.slice(0, LIMITS.FLUX.SLICE), subscriptionCount };
+        return { found: true, event, storeHandlerCount: storeHandlers.length, storeHandlers: storeHandlers.slice(0, limit), subscriptionCount };
     }
 
     if (action === "types" || action === "events" || (!action && !event)) {
         const eventSet = new Set<string>();
-        const actionHandlers = dispatcher._actionHandlers;
+        const ah = dispatcher._actionHandlers;
+        const addKeys = (o: Record<string, unknown> | undefined) => { if (o) for (const k in o) eventSet.add(k); };
 
-        if (actionHandlers?._dependencyGraph?.nodes) {
-            for (const nodeId in actionHandlers._dependencyGraph.nodes) {
-                const handler = actionHandlers._dependencyGraph.nodes[nodeId]?.actionHandler;
-                if (handler) {
-                    for (const evt in handler) eventSet.add(evt);
-                }
-            }
+        for (const nodeId in ah?._dependencyGraph?.nodes ?? {}) {
+            addKeys(ah!._dependencyGraph!.nodes![nodeId]?.actionHandler);
         }
-        if (actionHandlers?._orderedActionHandlers) {
-            for (const evt in actionHandlers._orderedActionHandlers) eventSet.add(evt);
-        }
-        if (dispatcher._subscriptions) {
-            for (const evt in dispatcher._subscriptions) eventSet.add(evt);
-        }
+        addKeys(ah?._orderedActionHandlers);
+        addKeys(dispatcher._subscriptions);
 
         let events = [...eventSet].sort();
         if (filterPattern) {
-            const regex = new RegExp(filterPattern, "i");
+            const regex = u.compileFilterRegex(filterPattern);
+            if (!regex) {
+                u.mcpLogger.warn(`flux: invalid filter regex "${filterPattern}"`);
+                return { error: true, message: `Invalid filter regex: ${filterPattern}` };
+            }
             events = events.filter(e => regex.test(e));
         }
 
-        return { total: eventSet.size, filtered: events.length, events: events.slice(0, LIMITS.FLUX.SLICE), note: events.length > LIMITS.FLUX.SLICE ? "Use filter to narrow" : undefined };
+        return { total: eventSet.size, filtered: events.length, events: events.slice(0, limit), note: events.length > limit ? "Use filter or limit to narrow" : undefined };
     }
 
     return { error: true, message: "action: events, types, dispatch, listeners" };

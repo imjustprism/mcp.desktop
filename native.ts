@@ -6,6 +6,7 @@
 
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";
 
+import { DEFAULT_TIMEOUT_MS, getToolTimeout } from "./timeouts";
 import { JSONValue, MCPRequest, MCPResponse, ServerStats, ServerStatus } from "./types";
 
 const PORT = 8486;
@@ -23,43 +24,37 @@ const enum RPCError {
     RendererUnavailable = -32003,
 }
 
-const TIMEOUT_MS: Record<string, number> = {
-    default: 30_000,
-    "intl:bruteforce": 600_000,
-    "intl:test": 120_000,
-    "intl:unknown": 60_000,
-    "module:loadLazy": 120_000,
-    "module:watch": 120_000,
-    "module:watchGet": 60_000,
-    "module:components": 120_000,
-    "trace:start": 120_000,
-    "trace:store": 120_000,
-    "intercept:set": 120_000,
-    "patch:benchmark": 60_000,
-    "patch:slowscan": 60_000,
-    "patch:analyze": 60_000,
-    "patch:finds": 60_000,
-    "discord:waitForIpc": 30_000,
-};
-
 function getRequestTimeout(request: MCPRequest): number {
-    if (request.method !== "tools/call") return TIMEOUT_MS.default;
+    if (request.method !== "tools/call") return DEFAULT_TIMEOUT_MS;
     const params = request.params as { name?: string; arguments?: Record<string, unknown> } | undefined;
-    if (!params?.name) return TIMEOUT_MS.default;
-    const action = params.arguments?.action as string | undefined;
-    if (action) return TIMEOUT_MS[`${params.name}:${action}`] ?? TIMEOUT_MS.default;
-    return TIMEOUT_MS.default;
+    if (!params?.name) return DEFAULT_TIMEOUT_MS;
+    return getToolTimeout(params.name, params.arguments?.action as string | undefined);
 }
 
-let reloadWaitUntil = 0;
-const RELOAD_SETTLE_MS = 4000;
+let rendererReady = true;
+const readyWaiters: Array<() => void> = [];
 
 export function notifyReloadTriggered(): void {
-    reloadWaitUntil = Date.now() + RELOAD_SETTLE_MS;
+    rendererReady = false;
 }
 
 export function notifyRendererReady(): void {
-    if (reloadWaitUntil > 0) reloadWaitUntil = Date.now() + 3000;
+    if (rendererReady) return;
+    rendererReady = true;
+    while (readyWaiters.length) readyWaiters.shift()!();
+}
+
+function waitForRenderer(timeoutMs = 30_000): Promise<boolean> {
+    if (rendererReady) return Promise.resolve(true);
+    return new Promise(resolve => {
+        const resolver = () => { clearTimeout(timer); resolve(true); };
+        const timer = setTimeout(() => {
+            const idx = readyWaiters.indexOf(resolver);
+            if (idx >= 0) readyWaiters.splice(idx, 1);
+            resolve(false);
+        }, timeoutMs);
+        readyWaiters.push(resolver);
+    });
 }
 
 let server: Server | null = null;
@@ -139,8 +134,7 @@ function sendError(res: ServerResponse, id: number | string | null, code: RPCErr
 }
 
 function clearPending(reason: string): void {
-    const error = makeError(null, RPCError.InternalError, reason);
-    pendingRequests.forEach(resolve => resolve(error));
+    pendingRequests.forEach((resolve, id) => resolve(makeError(id, RPCError.InternalError, reason)));
     pendingRequests.clear();
     pendingTimers.forEach(timer => clearTimeout(timer));
     pendingTimers.clear();
@@ -216,10 +210,12 @@ export function startServer(): { ok: boolean; port: number } {
             return;
         }
 
-        if (reloadWaitUntil > 0) {
-            const remaining = reloadWaitUntil - Date.now();
-            if (remaining > 0) await new Promise<void>(r => setTimeout(r, remaining));
-            reloadWaitUntil = 0;
+        if (!rendererReady) {
+            const ok = await waitForRenderer();
+            if (!ok) {
+                sendError(res, request.id ?? null, RPCError.RendererUnavailable, "Renderer did not become ready within 30s");
+                return;
+            }
         }
 
         const id = (requestId = (requestId + 1) & 0x7fffffff);

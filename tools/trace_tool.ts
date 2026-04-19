@@ -9,7 +9,7 @@ import type { FluxStore } from "@vencord/discord-types";
 import { ActiveTrace, FluxAction, TraceCapture, TraceToolArgs } from "../types";
 import { getFluxDispatcherInternal, resolveStore } from "../webpack";
 import { LIMITS } from "./constants";
-import { cleanupAllTraces, cleanupExpiredTraces, cleanupTrace, serializeResult, traceState } from "./utils";
+import * as u from "./utils";
 
 function summarizeCaptures(captures: TraceCapture[], limit: number) {
     const typeCounts: Record<string, number> = {};
@@ -17,7 +17,7 @@ function summarizeCaptures(captures: TraceCapture[], limit: number) {
 
     const sliced = captures.slice(0, limit).map(c => {
         if (!c.data) return c;
-        const serialized = serializeResult(c.data, LIMITS.TRACE.SUMMARIZE_SERIALIZE);
+        const serialized = u.serializeResult(c.data, LIMITS.TRACE.SUMMARIZE_SERIALIZE);
         return { ts: c.ts, type: c.type, data: serialized.length > LIMITS.TRACE.SUMMARIZE_TEXT_SLICE ? serialized.slice(0, LIMITS.TRACE.SUMMARIZE_TEXT_SLICE) + "..." : serialized };
     });
 
@@ -26,12 +26,12 @@ function summarizeCaptures(captures: TraceCapture[], limit: number) {
 
 export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
     const { action, id: traceId, filter } = args;
-    const duration = Math.min(Math.max(args.duration ?? 10000, 1000), 60000);
+    const duration = u.clamp(args.duration, 10000, 1000, 60000);
     const maxCaptures = Math.min(args.maxCaptures ?? 100, 500);
     const limit = args.limit ?? LIMITS.TRACE.HANDLER_SLICE;
 
     const dispatcher = getFluxDispatcherInternal();
-    cleanupExpiredTraces();
+    u.cleanupExpiredTraces();
 
     if (action === "events") {
         const events = new Set<string>();
@@ -48,7 +48,11 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
 
         let eventList = [...events].sort();
         if (filter) {
-            const regex = new RegExp(filter, "i");
+            const regex = u.compileFilterRegex(filter);
+            if (!regex) {
+                u.mcpLogger.warn(`trace: invalid filter regex "${filter}"`);
+                return { error: true, message: `Invalid filter regex: ${filter}` };
+            }
             eventList = eventList.filter(e => regex.test(e));
         }
 
@@ -62,7 +66,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
 
     if (action === "handlers") {
         const eventName = args.event;
-        if (!eventName) return { error: true, message: "event required" };
+        if (!eventName) return u.missingArg("event");
 
         const ordered = dispatcher._actionHandlers?._orderedActionHandlers?.[eventName];
         const subscriptions = dispatcher._subscriptions?.[eventName];
@@ -77,18 +81,18 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
     }
 
     if (action === "storeEvents") {
-        if (!args.store) return { error: true, message: "store name required" };
+        if (!args.store) return u.missingArg("store");
 
         const resolved = resolveStore(args.store);
-        const storeName = resolved?.name ?? args.store;
+        if (!resolved) return { error: true, message: `Store "${args.store}" not found` };
+        const { name: storeName } = resolved;
         const nodes = dispatcher._actionHandlers?._dependencyGraph?.nodes;
         const events: string[] = [];
 
         if (nodes) {
             for (const nodeId in nodes) {
-                const node = nodes[nodeId];
-                if (node.name === storeName || node.name === args.store) {
-                    events.push(...Object.keys(node.actionHandler ?? {}));
+                if (nodes[nodeId].name === storeName) {
+                    events.push(...Object.keys(nodes[nodeId].actionHandler ?? {}));
                 }
             }
         }
@@ -97,8 +101,15 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
     }
 
     if (action === "start" || (!action && filter)) {
-        const filterRegex = filter ? new RegExp(filter, "i") : null;
-        const id = traceState.nextId++;
+        let filterRegex: RegExp | null = null;
+        if (filter) {
+            filterRegex = u.compileFilterRegex(filter);
+            if (!filterRegex) {
+                u.mcpLogger.warn(`trace: invalid filter regex "${filter}"`);
+                return { error: true, message: `Invalid filter regex: ${filter}` };
+            }
+        }
+        const id = u.traceState.nextId++;
         const now = Date.now();
 
         const trace: ActiveTrace = {
@@ -111,12 +122,18 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
             unsub: null,
         };
 
-        if (!traceState.interceptor) {
-            traceState.interceptor = (fluxAction: FluxAction) => {
+        if (!u.traceState.interceptor) {
+            if (typeof dispatcher.addInterceptor !== "function") {
+                u.mcpLogger.error("trace: FluxDispatcher.addInterceptor unavailable");
+                return { error: true, message: "FluxDispatcher.addInterceptor unavailable; traces cannot be registered" };
+            }
+            const interceptor = (fluxAction: FluxAction) => {
                 const ts = Date.now();
-                for (const t of traceState.active.values()) {
+                const expired: number[] = [];
+                for (const [tid, t] of u.traceState.active) {
                     if (t.isStoreTrace) continue;
-                    if (ts >= t.expiresAt || t.captures.length >= t.maxCaptures) continue;
+                    if (ts >= t.expiresAt) { expired.push(tid); continue; }
+                    if (t.captures.length >= t.maxCaptures) continue;
                     if (t.filter && !t.filter.test(fluxAction.type)) continue;
 
                     const { type, ...payload } = fluxAction;
@@ -126,18 +143,20 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
                     });
                     t.captures.push(hasData ? { ts, type, data: payload } : { ts, type });
                 }
+                for (const tid of expired) u.cleanupTrace(tid);
                 return false;
             };
-            dispatcher.addInterceptor?.(traceState.interceptor);
+            dispatcher.addInterceptor(interceptor);
+            u.traceState.interceptor = interceptor;
         }
 
-        traceState.active.set(id, trace);
+        u.traceState.active.set(id, trace);
         return { id, filter: filter ?? "*", duration, maxCaptures };
     }
 
     if (action === "get") {
         if (traceId === undefined) {
-            const traces = [...traceState.active.values()].map(t => ({
+            const traces = [...u.traceState.active.values()].map(t => ({
                 id: t.id,
                 filter: t.filter?.source ?? "*",
                 captureCount: t.captures.length,
@@ -148,7 +167,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
             return { activeTraces: traces.length, traces };
         }
 
-        const trace = traceState.active.get(traceId);
+        const trace = u.traceState.active.get(traceId);
         if (!trace) return { error: true, message: `Trace ${traceId} not found or expired` };
 
         const remaining = Math.max(0, trace.expiresAt - Date.now());
@@ -164,28 +183,28 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
 
     if (action === "stop") {
         if (traceId === undefined) {
-            const count = traceState.active.size;
-            cleanupAllTraces();
+            const count = u.traceState.active.size;
+            u.cleanupAllTraces();
             return { stopped: count };
         }
 
-        const trace = traceState.active.get(traceId);
+        const trace = u.traceState.active.get(traceId);
         if (!trace) return { error: true, message: `Trace ${traceId} not found` };
 
         const { captures } = trace;
-        cleanupTrace(traceId);
+        u.cleanupTrace(traceId);
         const summary = summarizeCaptures(captures, LIMITS.TRACE.STOP_CAPTURE_SLICE);
         return { id: traceId, stopped: true, captureCount: captures.length, ...summary };
     }
 
     if (action === "store") {
-        if (!args.store) return { error: true, message: "store name required" };
+        if (!args.store) return u.missingArg("store");
 
         const resolved = resolveStore(args.store);
         if (!resolved) return { error: true, message: `Store "${args.store}" not found` };
         const storeName = resolved.name;
-        const store = resolved.store as unknown as FluxStore;
-        const id = traceState.nextId++;
+        const store = resolved.store as any as FluxStore;
+        const id = u.traceState.nextId++;
         const now = Date.now();
 
         const trace: ActiveTrace = {
@@ -206,7 +225,7 @@ export async function handleTraceTool(args: TraceToolArgs): Promise<unknown> {
 
         store.addChangeListener(handler);
         trace.unsub = () => store.removeChangeListener(handler);
-        traceState.active.set(id, trace);
+        u.traceState.active.set(id, trace);
 
         return { id, store: storeName, duration, maxCaptures };
     }

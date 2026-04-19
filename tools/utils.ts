@@ -5,9 +5,15 @@
  */
 
 import { getIntlMessageFromHash } from "@utils/discord";
+import { isNonNullish } from "@utils/guards";
 import { runtimeHashMessageKey } from "@utils/intlHash";
+import { Logger } from "@utils/Logger";
+import { isObject, removeFromArray, tryOrElse } from "@utils/misc";
+import { canonicalizeMatch } from "@utils/patches";
+import * as WebpackPatcher from "@webpack/patcher";
 
 import keyMapJson from "../map/key_map.json";
+import { getToolTimeout } from "../timeouts";
 import {
     ActiveTrace,
     AnchorCandidate,
@@ -28,11 +34,12 @@ import {
     StoryEntry,
     WebpackModule,
 } from "../types";
-import { Flux, factoryListeners, findAll, findStore, getFluxDispatcherInternal, getIconsModuleId, getUIBarrelModuleId, IconsModule, i18n, plugins, UIBarrelModule, wreq } from "../webpack";
-import { CSS_CLASS_RE, createIntlKeyPatternRegex, LIMITS, MANA_COMPONENT_RE, REGEX_CACHE_MAX_SIZE } from "./constants";
-import { WebpackPatcher } from "Vencord";
+import { factoryListeners, findAll, findStore, Flux, getFluxDispatcherInternal, getIconsModuleId, getUIBarrelModuleId, i18n, IconsModule, plugins, UIBarrelModule, wreq } from "../webpack";
+import { CACHE_TTL, createIntlKeyPatternRegex, CSS_CLASS_RE, INTL_DETECTION, LIMITS, MANA_COMPONENT_RE, REGEX_CACHE_MAX_SIZE } from "./constants";
 
-const KEY_MAP: Record<string, string> = keyMapJson;
+export const mcpLogger = new Logger("mcp", "#d97756");
+
+const KEY_MAP: Record<string, string> = { ...keyMapJson };
 const { getFactoryPatchedSource, getFactoryPatchedBy } = WebpackPatcher;
 
 const regexCache = new Map<string, RegExp>();
@@ -53,7 +60,7 @@ let moduleIdCacheTime = 0;
 
 export function getModuleIds(): string[] {
     const now = Date.now();
-    if (!moduleIdCache || now - moduleIdCacheTime > 5000) {
+    if (!moduleIdCache || now - moduleIdCacheTime > CACHE_TTL.MODULE_IDS_MS) {
         moduleIdCache = Object.keys(wreq.m);
         moduleIdCacheTime = now;
     }
@@ -76,7 +83,7 @@ let cacheTimestamp = 0;
 
 export function getModuleSource(id: string): string {
     const now = Date.now();
-    if (now - cacheTimestamp > 60000) {
+    if (now - cacheTimestamp > CACHE_TTL.MODULE_SOURCE_MS) {
         moduleSourceCache.clear();
         cacheTimestamp = now;
     }
@@ -101,7 +108,7 @@ export function countModuleMatchesFast(str: string, earlyExit = 10): number {
     if (!str || str.length < 3) return 0;
 
     const cached = batchResultsCache.get(str);
-    if (cached) return Math.min(cached.count, earlyExit);
+    if (cached && cached.count < cached.scannedTo) return Math.min(cached.count, earlyExit);
 
     let count = 0;
     const moduleIds: string[] = [];
@@ -115,13 +122,13 @@ export function countModuleMatchesFast(str: string, earlyExit = 10): number {
         }
     }
 
-    batchResultsCache.set(str, { count, moduleIds });
+    batchResultsCache.set(str, { count, moduleIds, scannedTo: earlyExit });
     return count;
 }
 
 export function batchCountModuleMatches(strings: string[], earlyExit = 10): Map<string, BatchResult> {
     const now = Date.now();
-    if (now - batchCacheTime > 60000) {
+    if (now - batchCacheTime > CACHE_TTL.BATCH_COUNT_MS) {
         batchResultsCache.clear();
         batchCacheTime = now;
     }
@@ -131,9 +138,9 @@ export function batchCountModuleMatches(strings: string[], earlyExit = 10): Map<
 
     for (const str of strings) {
         const cached = batchResultsCache.get(str);
-        if (cached) results.set(str, cached);
+        if (cached && cached.count < cached.scannedTo) results.set(str, cached);
         else {
-            results.set(str, { count: 0, moduleIds: [] });
+            results.set(str, { count: 0, moduleIds: [], scannedTo: earlyExit });
             toScan.push(str);
         }
     }
@@ -178,18 +185,34 @@ export const moduleWatchState = {
 };
 
 let intlHashToKeyMap: Map<string, string> | null = null;
+
+export function clearIntlCache(): void {
+    intlHashToKeyMap = null;
+}
+
+export function addToKeyMap(entries: Record<string, string>): number {
+    let added = 0;
+    for (const [hash, key] of Object.entries(entries)) {
+        if (!(hash in KEY_MAP)) {
+            (KEY_MAP as Record<string, string>)[hash] = key;
+            added++;
+        }
+    }
+    if (added) intlHashToKeyMap = null;
+    return added;
+}
 let localeMessagesCache: Record<string, unknown[]> | null = null;
 let localeMessagesCacheTime = 0;
 
 export function getLocaleMessages(): Record<string, unknown[]> | null {
     const now = Date.now();
-    if (localeMessagesCache && now - localeMessagesCacheTime < 300000) return localeMessagesCache;
+    if (localeMessagesCache && now - localeMessagesCacheTime < CACHE_TTL.LOCALE_MESSAGES_MS) return localeMessagesCache;
 
     for (const mod of Object.values(wreq.c) as WebpackModule[]) {
         const exp = mod?.exports?.default;
         if (!exp || typeof exp !== "object") continue;
-        const keys = Object.keys(exp);
-        if (keys.length > 10000 && keys.every(k => k.length === 6 || k.length === 7)) {
+        const keys = Object.keys(exp).filter(k => k !== "__esModule");
+        if (keys.length > INTL_DETECTION.MIN_LOCALE_KEY_COUNT && keys.every(k => k.length === 6 || k.length === 7)) {
             localeMessagesCache = exp as Record<string, unknown[]>;
             localeMessagesCacheTime = now;
             return localeMessagesCache;
@@ -205,7 +228,7 @@ export function getOrderedIntlHashes(): string[] | null {
 
     for (const [id, factory] of Object.entries(wreq.m) as [string, { toString(): string }][]) {
         const src = factory.toString();
-        if (src.length < 500000 || !src.includes('"323362"')) continue;
+        if (src.length < INTL_DETECTION.ORDERED_MODULE_MIN_SRC_LEN || !src.includes(INTL_DETECTION.ORDERED_MODULE_SENTINEL_HASH)) continue;
 
         const pattern = /"([A-Za-z0-9+/]{6})":/g;
         const hashes: string[] = [];
@@ -217,7 +240,7 @@ export function getOrderedIntlHashes(): string[] | null {
                 hashes.push(m[1]);
             }
         }
-        if (hashes.length > 10000) {
+        if (hashes.length > INTL_DETECTION.MIN_LOCALE_KEY_COUNT) {
             orderedIntlHashesCache = hashes;
             return hashes;
         }
@@ -358,28 +381,8 @@ export function getAllStoreNames(): string[] {
         .sort();
 }
 
-const RENDERER_TIMEOUT_MS: Record<string, number> = {
-    "intl:bruteforce": 600_000,
-    "intl:test": 120_000,
-    "intl:unknown": 60_000,
-    "module:loadLazy": 120_000,
-    "module:watch": 120_000,
-    "module:watchGet": 60_000,
-    "module:components": 120_000,
-    "trace:start": 120_000,
-    "trace:store": 120_000,
-    "intercept:set": 120_000,
-    "patch:benchmark": 60_000,
-    "patch:slowscan": 60_000,
-    "patch:analyze": 60_000,
-    "patch:finds": 60_000,
-    "discord:waitForIpc": 30_000,
-};
-
 export function getAdaptiveTimeout(toolName: string, args?: Record<string, unknown>): number {
-    const action = args?.action as string | undefined;
-    if (action) return RENDERER_TIMEOUT_MS[`${toolName}:${action}`] ?? 30_000;
-    return 30_000;
+    return getToolTimeout(toolName, args?.action as string | undefined);
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, toolName: string): Promise<T> {
@@ -409,7 +412,7 @@ export function cleanupIntercept(id: number): boolean {
         try {
             intercept.methodParent[intercept.methodKey] = intercept.original;
         } catch {
-            /* property not writable */
+            /* ew */
         }
     } else {
         const mod = wreq.c[intercept.moduleId] as WebpackModule | undefined;
@@ -421,7 +424,7 @@ export function cleanupIntercept(id: number): boolean {
                     Object.defineProperty(mod.exports, intercept.exportKey, { value: intercept.original, configurable: true, writable: true });
                 }
             } catch {
-                /* property not configurable */
+                /* ew */
             }
         }
     }
@@ -429,16 +432,16 @@ export function cleanupIntercept(id: number): boolean {
     return true;
 }
 
-export function cleanupExpiredIntercepts(): void {
+function expireAll<T extends { expiresAt: number }>(map: Map<number, T>, cleanup: (id: number) => void): void {
     const now = Date.now();
-    for (const [id, intercept] of interceptState.active) {
-        if (now >= intercept.expiresAt) cleanupIntercept(id);
-    }
+    for (const [id, v] of map) if (now >= v.expiresAt) cleanup(id);
+}
+function cleanAll<T>(map: Map<number, T>, cleanup: (id: number) => void): void {
+    for (const id of [...map.keys()]) cleanup(id);
 }
 
-export function cleanupAllIntercepts(): void {
-    for (const id of interceptState.active.keys()) cleanupIntercept(id);
-}
+export const cleanupExpiredIntercepts = () => expireAll(interceptState.active, cleanupIntercept);
+export const cleanupAllIntercepts = () => cleanAll(interceptState.active, cleanupIntercept);
 
 export function cleanupTrace(id: number): boolean {
     const trace = traceState.active.get(id);
@@ -448,24 +451,16 @@ export function cleanupTrace(id: number): boolean {
     traceState.active.delete(id);
 
     if (!traceState.active.size && traceState.interceptor) {
-        const dispatcher = getFluxDispatcherInternal();
-        const idx = dispatcher._interceptors?.indexOf(traceState.interceptor);
-        if (idx !== undefined && idx >= 0) dispatcher._interceptors?.splice(idx, 1);
+        const { _interceptors } = getFluxDispatcherInternal();
+        const { interceptor } = traceState;
+        if (_interceptors) removeFromArray(_interceptors, i => i === interceptor);
         traceState.interceptor = null;
     }
     return true;
 }
 
-export function cleanupExpiredTraces(): void {
-    const now = Date.now();
-    for (const [id, trace] of traceState.active) {
-        if (now >= trace.expiresAt) cleanupTrace(id);
-    }
-}
-
-export function cleanupAllTraces(): void {
-    for (const id of traceState.active.keys()) cleanupTrace(id);
-}
+export const cleanupExpiredTraces = () => expireAll(traceState.active, cleanupTrace);
+export const cleanupAllTraces = () => cleanAll(traceState.active, cleanupTrace);
 
 export function cleanupModuleWatch(id: number): boolean {
     const watch = moduleWatchState.active.get(id);
@@ -475,16 +470,8 @@ export function cleanupModuleWatch(id: number): boolean {
     return true;
 }
 
-export function cleanupExpiredModuleWatches(): void {
-    const now = Date.now();
-    for (const [id, watch] of moduleWatchState.active) {
-        if (now >= watch.expiresAt) cleanupModuleWatch(id);
-    }
-}
-
-export function cleanupAllModuleWatches(): void {
-    for (const id of moduleWatchState.active.keys()) cleanupModuleWatch(id);
-}
+export const cleanupExpiredModuleWatches = () => expireAll(moduleWatchState.active, cleanupModuleWatch);
+export const cleanupAllModuleWatches = () => cleanAll(moduleWatchState.active, cleanupModuleWatch);
 
 const FIBER_TAGS: Readonly<Record<number, string>> = {
     0: "Function",
@@ -519,7 +506,7 @@ const FIBER_TAGS: Readonly<Record<number, string>> = {
 
 export function getFiber(el: Element): ReactFiber | null {
     for (const key in el) {
-        if (key.startsWith("__reactFiber$")) return (el as unknown as Record<string, ReactFiber>)[key];
+        if (key.startsWith("__reactFiber$")) return (el as any)[key] as ReactFiber;
     }
     return null;
 }
@@ -641,7 +628,7 @@ function buildCSSIndex(): CSSIndexCache {
 }
 
 export function getCSSIndex(): CSSIndexCache {
-    if (cssCache && Date.now() - cssCache.builtAt < LIMITS.CSS.INDEX_TTL_MS) return cssCache;
+    if (cssCache && Date.now() - cssCache.builtAt < CACHE_TTL.CSS_INDEX_MS) return cssCache;
     cssCache = buildCSSIndex();
     return cssCache;
 }
@@ -688,7 +675,7 @@ function buildComponentIndex(): ComponentIndex {
     };
 
     const getDisplayName = (val: unknown): string | undefined => {
-        if (typeof val === "function") return (val as unknown as { displayName?: string }).displayName;
+        if (typeof val === "function") return (val as any).displayName;
         if (val && typeof val === "object") {
             const obj = val as Record<string, unknown>;
             return (obj.displayName ?? (obj.render as { displayName?: string } | undefined)?.displayName) as string | undefined;
@@ -766,7 +753,7 @@ function buildComponentIndex(): ComponentIndex {
 }
 
 export function getComponentIndex(): ComponentIndex {
-    if (componentCache && Date.now() - componentCache.builtAt < LIMITS.COMPONENT.INDEX_TTL_MS) return componentCache;
+    if (componentCache && Date.now() - componentCache.builtAt < CACHE_TTL.COMPONENT_INDEX_MS) return componentCache;
     componentCache = buildComponentIndex();
     return componentCache;
 }
@@ -839,6 +826,256 @@ export function compareByAnchorType(a: { type: string; unique?: boolean }, b: { 
     const aBase = a.type.replace("+ctx", "");
     const bBase = b.type.replace("+ctx", "");
     return (typeOrder[aBase] ?? 9) - (typeOrder[bBase] ?? 9);
+}
+
+interface HintExport {
+    displayName?: string;
+    name?: string;
+    $$typeof?: symbol;
+    render?: { displayName?: string };
+    type?: { displayName?: string; name?: string };
+    default?: { displayName?: string; name?: string };
+    getName?: () => string;
+    emitChange?: () => void;
+}
+
+export function getModuleHint(id: string): string | null {
+    const mod = wreq.c[id] as WebpackModule | undefined;
+    if (!mod?.exports) return null;
+    const exp = mod.exports as Record<string, HintExport | string | undefined> & HintExport;
+    const dn = exp.default?.displayName ?? exp.displayName ?? exp.default?.name;
+    if (typeof dn === "string" && dn.length > 1) return dn;
+    const keys = Object.keys(exp);
+    if (keys.length <= 3 && keys.every(k => CSS_CLASS_RE.test(typeof exp[k] === "string" ? (exp[k] as string) : ""))) return "[css]";
+    for (const k of keys) {
+        const val = exp[k];
+        if (!val || typeof val !== "object") continue;
+        const proto = safeProto(val) as HintExport | null;
+        if (proto?.getName && proto.emitChange) {
+            const storeName = safeCall(() => (val as HintExport).getName?.(), undefined);
+            if (storeName) return storeName + " (store)";
+        }
+    }
+    for (const k of keys) {
+        const val = exp[k];
+        if (!val || typeof val !== "object" || !val.$$typeof) continue;
+        const name = val.displayName ?? val.render?.displayName ?? val.type?.displayName ?? val.type?.name;
+        if (typeof name === "string" && name.length > 1) return name + " (component)";
+        const st = String(val.$$typeof);
+        if (st.includes("memo")) return "[memo component]";
+        if (st.includes("forward_ref")) return "[forwardRef component]";
+        return "[component]";
+    }
+    const meaningful = keys.filter(k => k.length > 2 && !/^[A-Z]{1,2}$/.test(k));
+    if (meaningful.length) {
+        if (meaningful.length <= 5) return meaningful.join(",");
+        return meaningful.slice(0, 3).join(",") + `...+${meaningful.length - 3}`;
+    }
+    if (keys.length === 1) {
+        const val = exp[keys[0]];
+        if (val && typeof val === "object") {
+            const valKeys = Object.keys(val).filter(k => k.length > 2);
+            if (valKeys.length) return valKeys.slice(0, 3).join(",") + (valKeys.length > 3 ? `...+${valKeys.length - 3}` : "");
+        }
+    }
+    if (keys.length <= 5) return keys.join(",");
+    return `${keys.length} exports`;
+}
+
+export function patchFindAsString(find: string | RegExp | undefined): string {
+    if (typeof find === "string") return find;
+    return find?.toString() ?? "";
+}
+
+export interface CanonFindMatcher {
+    test: (src: string) => boolean;
+    canonical: string;
+    isRegex: boolean;
+}
+
+export function canonFindMatcher(find: string | RegExp | undefined): CanonFindMatcher {
+    if (!find) return { test: () => false, canonical: "", isRegex: false };
+    if (find instanceof RegExp) {
+        const r = canonicalizeMatch(find);
+        return {
+            test: (src: string) => { if (r.global) r.lastIndex = 0; return r.test(src); },
+            canonical: r.source,
+            isRegex: true,
+        };
+    }
+    const s = canonicalizeMatch(find);
+    return { test: (src: string) => src.includes(s), canonical: s, isRegex: false };
+}
+
+export function getReplacements(patch: PluginPatch): PluginReplacement[] {
+    return Array.isArray(patch.replacement) ? patch.replacement : [patch.replacement];
+}
+
+const REGEX_META = /[.*+?^${}()|[\]\\]/g;
+function escapeRegex(s: string): string { return s.replace(REGEX_META, "\\$&"); }
+
+export function buildPatchRegex(match: string | RegExp): RegExp {
+    if (match instanceof RegExp) return canonicalizeMatch(match);
+    const parsed = parseRegex(match);
+    if (parsed) return canonicalizeMatch(parsed);
+    return getCachedRegex(escapeRegex(canonicalizeMatch(match)));
+}
+
+export interface BenchmarkResult {
+    coldMs: number;
+    medianUs: number;
+    minUs: number;
+    roundsUs: number[];
+    wouldFlagSlow: boolean;
+}
+
+export function benchmarkReplace(source: string, regex: RegExp, replaceStr: string, iters: number, numRounds: number): BenchmarkResult {
+    const coldStart = performance.now();
+    source.replace(regex, replaceStr);
+    const coldMs = performance.now() - coldStart;
+
+    const warmup = Math.min(iters, 500);
+    for (let i = 0; i < warmup; i++) source.replace(regex, replaceStr);
+
+    const roundTimes: number[] = [];
+    for (let r = 0; r < numRounds; r++) {
+        const start = performance.now();
+        for (let i = 0; i < iters; i++) source.replace(regex, replaceStr);
+        roundTimes.push(performance.now() - start);
+    }
+
+    const perOp = roundTimes.map(t => t / iters);
+    const sorted = [...perOp].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    return {
+        coldMs: +coldMs.toFixed(3),
+        medianUs: +(median * 1000).toFixed(2),
+        minUs: +(Math.min(...perOp) * 1000).toFixed(2),
+        roundsUs: perOp.map(t => +(t * 1000).toFixed(2)),
+        wouldFlagSlow: coldMs > 5,
+    };
+}
+
+export function clamp(v: number | undefined, def: number, lo: number, hi: number): number {
+    return Math.min(Math.max(v ?? def, lo), hi);
+}
+export const clampIters = (v: number | undefined, def: number, lo = 100, hi = 100_000) => clamp(v, def, lo, hi);
+export const clampRounds = (v: number | undefined, def: number, lo = 1, hi = 10) => clamp(v, def, lo, hi);
+
+export function countUnescapedCaptures(pattern: string): number {
+    let count = 0;
+    let inClass = false;
+    for (let i = 0; i < pattern.length; i++) {
+        const c = pattern[i];
+        if (c === "\\") { i++; continue; }
+        if (c === "[") { inClass = true; continue; }
+        if (c === "]") { inClass = false; continue; }
+        if (inClass) continue;
+        if (c !== "(") continue;
+        if (pattern[i + 1] !== "?") { count++; continue; }
+        if (pattern[i + 2] === "<" && pattern[i + 3] !== "=" && pattern[i + 3] !== "!") count++;
+    }
+    return count;
+}
+
+export function extractCaptureNames(pattern: string): string[] {
+    const names: string[] = [];
+    const re = /\(\?<([A-Za-z_$][\w$]*)>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(pattern))) names.push(m[1]);
+    return names;
+}
+
+export interface IntlProbe {
+    intlKey: string;
+    intlStatus: "key_valid_but_unused" | "key_not_found";
+}
+
+let _intlKeyPatternSingle: RegExp | null = null;
+function _intlKeyPattern(): RegExp {
+    return (_intlKeyPatternSingle ??= /#\{intl::([A-Z][A-Z0-9_]*)/);
+}
+
+export function probeIntlKey(rawFind: string): IntlProbe | null {
+    const m = rawFind.match(_intlKeyPattern());
+    if (!m?.[1]) return null;
+    const hash = runtimeHashMessageKey(m[1]);
+    return { intlKey: m[1], intlStatus: intlHashExistsInDefinitions(hash) ? "key_valid_but_unused" : "key_not_found" };
+}
+
+export function snippetAround(source: string, idx: number, matchLen: number, before = 60, after = 120): string {
+    return source.slice(Math.max(0, idx - before), Math.min(source.length, idx + matchLen + after));
+}
+
+export interface PluginPatchIteration {
+    name: string;
+    plugin: VencordPluginLike;
+    patch: PluginPatch;
+    patchIndex: number;
+    rawFind: string;
+    canonFind: string;
+}
+type VencordPluginLike = { started?: boolean; required?: boolean; patches?: PluginPatch[] };
+
+export function* iterPluginPatches(pluginsMap: Record<string, VencordPluginLike>, filter?: string): Generator<PluginPatchIteration> {
+    const lowerFilter = filter?.toLowerCase();
+    for (const [name, plugin] of Object.entries(pluginsMap)) {
+        if (lowerFilter && !name.toLowerCase().includes(lowerFilter)) continue;
+        if (!plugin.patches?.length) continue;
+        for (let patchIndex = 0; patchIndex < plugin.patches.length; patchIndex++) {
+            const patch = plugin.patches[patchIndex];
+            const rawFind = patchFindAsString(patch.find);
+            yield { name, plugin, patch, patchIndex, rawFind, canonFind: canonicalizeMatch(rawFind) };
+        }
+    }
+}
+
+export function forEachLoadedModule(cb: (id: string, exports: WebpackModule["exports"]) => boolean | void): void {
+    for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
+        if (!mod?.exports) continue;
+        if (cb(id, mod.exports) === false) return;
+    }
+}
+
+export const safeCall = tryOrElse;
+export { isNonNullish, isObject };
+
+export function safeProto(obj: object | null | undefined): object | null {
+    if (!obj) return null;
+    try { return Object.getPrototypeOf(obj); } catch { return null; }
+}
+
+export function filterByLowerIncludes<T>(items: readonly T[], query: string, key: (t: T) => string): T[] {
+    const lower = query.toLowerCase();
+    return items.filter(item => key(item).toLowerCase().includes(lower));
+}
+
+export function rankedSuggestions(names: readonly string[], query: string, max: number): string[] {
+    const lower = query.toLowerCase();
+    const starts: string[] = [];
+    const contains: string[] = [];
+    for (const name of names) {
+        const nl = name.toLowerCase();
+        if (nl.startsWith(lower)) starts.push(name);
+        else if (nl.includes(lower)) contains.push(name);
+    }
+    return [...starts, ...contains].slice(0, max);
+}
+
+export function isClassComponent(v: unknown): boolean {
+    return typeof v === "function" && !!(v as { prototype?: { render?: unknown } }).prototype?.render;
+}
+
+export function missingArg(name: string): { error: true; message: string } {
+    return { error: true, message: `${name} required` };
+}
+
+export function getDescriptor(obj: object, proto: object | null, name: string): PropertyDescriptor | undefined {
+    return Object.getOwnPropertyDescriptor(obj, name) ?? (proto ? Object.getOwnPropertyDescriptor(proto, name) : undefined);
+}
+
+export function compileFilterRegex(pattern: string, flags = "i"): RegExp | null {
+    try { return new RegExp(pattern, flags); } catch { return null; }
 }
 
 export { findAll, findStore, getIntlMessageFromHash, KEY_MAP, runtimeHashMessageKey };

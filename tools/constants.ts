@@ -5,7 +5,7 @@
  */
 
 export const createIntlHashDotRegex = () => /\.t\.([A-Za-z0-9+/]{6})/g;
-export const createIntlHashBracketRegex = () => /\.t\["([A-Za-z0-9+/]{6,8})"\]/g;
+export const createIntlHashBracketRegex = () => /\.t\["([A-Za-z0-9+/]{6})"\]/g;
 export const createIntlKeyPatternRegex = (global = false) => (global ? /#\{intl::([A-Z][A-Z0-9_]*)/g : /#\{intl::([A-Z][A-Z0-9_]*)/);
 
 export const JS_RESERVED_KEYWORDS = new Set([
@@ -90,17 +90,32 @@ export const CONTEXT = {
     FIND_SNIPPET_AFTER: 120,
     MATCH_CONTEXT_PAD: 80,
     MATCHED_TEXT_MAX: 300,
-    REPLACEMENT_BEFORE: 50,
-    REPLACEMENT_AFTER: 200,
+    REPLACEMENT_BEFORE: 100,
+    REPLACEMENT_AFTER: 300,
     FIND_CONTEXT_BEFORE: 300,
     FIND_CONTEXT_AFTER: 500,
     ANCHOR_RADIUS: 500,
     MAX_ANCHORS: 12,
-    SEARCH_SNIPPET: 50,
+    SEARCH_SNIPPET: 80,
     ANNOTATE_MAX_LENGTH: 50000,
 } as const;
 
 export const REGEX_CACHE_MAX_SIZE = 100;
+
+export const CACHE_TTL = {
+    MODULE_SOURCE_MS: 60_000,
+    BATCH_COUNT_MS: 60_000,
+    LOCALE_MESSAGES_MS: 300_000,
+    MODULE_IDS_MS: 5_000,
+    CSS_INDEX_MS: 60_000,
+    COMPONENT_INDEX_MS: 60_000,
+} as const;
+
+export const INTL_DETECTION = {
+    MIN_LOCALE_KEY_COUNT: 10_000,
+    ORDERED_MODULE_MIN_SRC_LEN: 500_000,
+    ORDERED_MODULE_SENTINEL_HASH: '"323362"',
+} as const;
 
 export const INTERESTING_PROP_KEYWORDS = new Set(["message", "channel", "guild", "user", "member", "role"]);
 
@@ -136,6 +151,8 @@ export const LIMITS = {
         SUGGESTIONS: 10,
         METHOD_MATCHES: 15,
         SERIALIZE_CALL: 3000,
+        SNAPSHOT_MAX: 50,
+        SNAPSHOT_SERIALIZE: 500,
     },
     FLUX: {
         SLICE: 100,
@@ -175,7 +192,6 @@ export const LIMITS = {
         AVAILABLE_FUNCTIONS: 20,
     },
     CSS: {
-        INDEX_TTL_MS: 60000,
         MAX_CLASSES_PER_MODULE: 100,
         TOP_MODULES: 20,
         SAMPLE_CLASSES: 5,
@@ -192,7 +208,6 @@ export const LIMITS = {
         SUGGEST_MAX_COMBINED_GAP: 200,
     },
     COMPONENT: {
-        INDEX_TTL_MS: 60000,
         MAX_CONTROLS: 30,
         MAX_PROPS: 40,
         MAX_MATCHES: 20,
@@ -205,5 +220,74 @@ export const LIMITS = {
         FIND_SLICE: 100,
         PATCHES_SLICE: 10,
         SUGGESTIONS: 5,
+    },
+    PATCH: {
+        UNIQUE_EARLY_EXIT: 11,
+        UNIQUE_MODULE_PREVIEW: 10,
+        PLUGIN_MATCH_EARLY_EXIT: 5,
+        PLUGIN_MATCH_PREVIEW: 5,
+        PLUGIN_SIMILAR_SUGGESTIONS: 5,
+        ANALYZE_MAX_ISSUES: 100,
+        ANALYZE_FIND_SLICE: 100,
+        ANALYZE_CANON_SLICE: 100,
+        LINT_MIN_FIND_LENGTH: 20,
+        LINT_MAX_FIND_LENGTH: 200,
+        LINT_MAX_CAPTURES: 3,
+        LINT_PREVIEW_SLICE: 200,
+        LINT_EARLY_EXIT: 5,
+        FINDS_MAX_SPECS: 100,
+        FINDS_RESULT_LIMIT: 100,
+        BENCHMARK_DEFAULT_ITERS: 10_000,
+        BENCHMARK_DEFAULT_ROUNDS: 3,
+        COMPARE_DEFAULT_ROUNDS: 5,
+        COMPARE_EARLY_EXIT: 2,
+        COMPARE_MATCH_SLICE: 100,
+        COMPARE_REPLACE_SLICE: 100,
+        COMPARE_MATCHED_SLICE: 80,
+        SLOWSCAN_DEFAULT_ITERS: 1_000,
+        SLOWSCAN_MAX_ITERS: 50_000,
+        SLOWSCAN_DEFAULT_TOP_N: 20,
+        SLOWSCAN_MAX_TOP_N: 100,
+        SLOWSCAN_COLD_SLOW_MS: 5,
+        SLOWSCAN_MATCH_SLICE: 80,
+        CONFLICTS_EARLY_EXIT: 2,
+        CONFLICTS_FIND_SLICE: 60,
+        CONFLICTS_DEFAULT_TOP_N: 20,
+        DIFF_EARLY_EXIT: 2,
+        DIFF_FIND_SLICE: 80,
+        DIFF_MATCH_SLICE: 120,
+        DIFF_REPLACE_SLICE: 120,
+        BROKEN_EARLY_EXIT: 5,
+        BROKEN_FIND_SLICE: 100,
+        BROKEN_CANON_SLICE: 100,
+        BROKEN_FRAGMENT_MIN_LEN: 8,
+        BROKEN_FRAGMENT_MAX: 5,
+        BROKEN_FRAGMENT_EARLY_EXIT: 3,
+        BROKEN_FRAGMENT_PREVIEW: 3,
+        BROKEN_FRAGMENT_SLICE: 60,
+        RAW_FIND_SLICE: 200,
+        REPLACEMENT_MATCH_SLICE: 150,
+        REPLACEMENT_REPLACE_SLICE: 100,
+        ERROR_MSG_SLICE: 150,
+    },
+    ANALYSIS: {
+        SCORE_MIN: 1,
+        SCORE_MAX: 10,
+        SCORE_INTL: 3,
+        SCORE_STRING_LITERAL: 2,
+        SCORE_PROP_NAME: 2,
+        SCORE_IDENTIFIER: 1,
+        SCORE_LOOKBEHIND: 1,
+        SCORE_PENALTY_MINIFIED: 3,
+        SCORE_PENALTY_FORBIDDEN: 2,
+        SCORE_PENALTY_SHORT: 1,
+        SCORE_PENALTY_GENERIC: 2,
+        SCORE_PENALTY_WILDCARD: 1,
+        SCORE_PENALTY_LONG: 1,
+        SCORE_PENALTY_CAPTURES: 1,
+        SCORE_PENALTY_NO_ANCHORS: 1,
+        SCORE_PENALTY_NO_MATCH: 5,
+        SCORE_PENALTY_AMBIGUOUS: 3,
+        BASE_SCORE: 5,
     },
 } as const;

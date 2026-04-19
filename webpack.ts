@@ -4,13 +4,24 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { plugins, startPlugin, stopPlugin } from "@api/PluginManager";
+import * as PluginManager from "@api/PluginManager";
+const { startPlugin, stopPlugin } = PluginManager;
 import { Settings } from "@api/Settings";
 import { factoryListeners, filters, findAll, findByPropsLazy, findStore, findStoreLazy, search, wreq } from "@webpack";
 import * as Common from "@webpack/common";
 import { Constants, Flux, FluxDispatcher, i18n, SnowflakeUtils } from "@webpack/common";
 
-import { DesignTokens, FluxActionHandlers, FluxDispatcherInternal, GatewaySocket, PlatformUtils as PlatformUtilsType, PluginSettings, SnowflakeUtilsType, WebpackModule } from "./types";
+import { DesignTokens, FluxActionHandlers, FluxDispatcherInternal, GatewaySocket, PlatformUtils as PlatformUtilsType, PluginSettings, SnowflakeUtilsType, VencordPlugin, WebpackModule } from "./types";
+
+function getLivePlugins(): Record<string, VencordPlugin> {
+    return (PluginManager.plugins ?? {}) as any;
+}
+export const plugins = new Proxy({} as Record<string, VencordPlugin>, {
+    get: (_, key) => getLivePlugins()[key as string],
+    ownKeys: () => Reflect.ownKeys(getLivePlugins()),
+    getOwnPropertyDescriptor: (_, key) => Object.getOwnPropertyDescriptor(getLivePlugins(), key),
+    has: (_, key) => key in getLivePlugins(),
+});
 
 const ICONS_ANCHOR = ["AngleBracketsIcon", "StaffBadgeIcon"] as const;
 const UI_BARREL_ANCHOR = ["ConfirmModal", "ExpressiveModal"] as const;
@@ -29,23 +40,12 @@ export const PlatformUtilsModule = findByPropsLazy("isWindows", "isLinux") as Pl
 export const DesignTokensModule = findByPropsLazy("unsafe_rawColors", "colors") as DesignTokens;
 
 export const Endpoints = Constants.Endpoints as Record<string, unknown>;
-export const DiscordConstants = Constants as unknown as Record<string, unknown>;
+export const DiscordConstants = Constants as any as Record<string, unknown>;
 
-export function getSnowflakeUtils(): SnowflakeUtilsType {
-    return SnowflakeUtils as unknown as SnowflakeUtilsType;
-}
-
-export function getCommonModules(): Record<string, unknown> {
-    return Common as unknown as Record<string, unknown>;
-}
-
-export function getFluxDispatcherInternal(): FluxDispatcherInternal {
-    return FluxDispatcher as unknown as FluxDispatcherInternal;
-}
-
-export function getActionHandlers(): FluxActionHandlers | undefined {
-    return (FluxDispatcher as unknown as FluxDispatcherInternal)._actionHandlers;
-}
+export const getSnowflakeUtils = (): SnowflakeUtilsType => SnowflakeUtils as any;
+export const getCommonModules = (): Record<string, unknown> => Common as any;
+export const getFluxDispatcherInternal = (): FluxDispatcherInternal => FluxDispatcher as any;
+export const getActionHandlers = (): FluxActionHandlers | undefined => (FluxDispatcher as any as FluxDispatcherInternal)._actionHandlers;
 
 function findModuleIdByProps(props: readonly string[]): string | null {
     for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
@@ -81,4 +81,4 @@ export function resolveStore(name: string): { store: Record<string, unknown>; na
 
 export const pluginSettings = Settings.plugins as Record<string, PluginSettings>;
 
-export { factoryListeners, filters, findAll, findStore, Flux, FluxDispatcher, i18n, plugins, search, startPlugin, stopPlugin, wreq };
+export { factoryListeners, filters, findAll, findStore, Flux, FluxDispatcher, i18n, search, startPlugin, stopPlugin, wreq };

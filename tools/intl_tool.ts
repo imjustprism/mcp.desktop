@@ -6,20 +6,10 @@
 
 import { IntlToolArgs, PatternData } from "../types";
 import { createIntlHashBracketRegex, createIntlHashDotRegex } from "./constants";
-import {
-    buildIntlHashToKeyMap,
-    extractIntlText,
-    getIntlKeyFromHash,
-    getIntlMessageFromHash,
-    getLocaleMessages,
-    getModuleSource,
-    getOrderedIntlHashes,
-    KEY_MAP,
-    runtimeHashMessageKey,
-    searchModulesOptimized,
-} from "./utils";
+import * as u from "./utils";
 
 let patternCache: PatternData | null = null;
+let patternCacheKeyMapSize = 0;
 
 function increment(map: Map<string, number>, key: string) {
     map.set(key, (map.get(key) ?? 0) + 1);
@@ -33,7 +23,9 @@ function sortByFrequency(counts: Map<string, number>, min = 2): string[] {
 }
 
 function buildPatternData(): PatternData {
-    if (patternCache) return patternCache;
+    const currentSize = Object.keys(u.KEY_MAP).length;
+    if (patternCache && patternCacheKeyMapSize === currentSize) return patternCache;
+    patternCache = null;
 
     const starters = new Map<string, number>();
     const transitionCounts = new Map<string, Map<string, number>>();
@@ -45,7 +37,7 @@ function buildPatternData(): PatternData {
     const suffixes2 = new Map<string, number>();
     const suffixes3 = new Map<string, number>();
 
-    for (const key of Object.values(KEY_MAP)) {
+    for (const key of Object.values(u.KEY_MAP)) {
         const segs = key.split("_");
         if (!segs.length) continue;
 
@@ -74,6 +66,7 @@ function buildPatternData(): PatternData {
     const transitions = new Map<string, string[]>();
     for (const [from, toMap] of transitionCounts) transitions.set(from, sortByFrequency(toMap, 1));
 
+    patternCacheKeyMapSize = currentSize;
     patternCache = {
         starters: sortByFrequency(starters, 1),
         transitions,
@@ -100,15 +93,16 @@ function extractWords(message: string): string[] {
 
 function* yieldTransitionChain(start: string, transitions: Map<string, string[]>, maxDepth: number, limits: number[]): Generator<string> {
     const queue: string[][] = [[start]];
-    while (queue.length) {
-        const path = queue.shift()!;
+    let head = 0;
+    while (head < queue.length) {
+        const path = queue[head++];
         if (path.length > 1) yield path.join("_");
         if (path.length > maxDepth) continue;
         const next = transitions.get(path[path.length - 1]);
         if (!next) continue;
-        for (const n of next.slice(0, limits[path.length - 1] ?? 10)) {
-            queue.push([...path, n]);
-        }
+        const cap = limits[path.length - 1] ?? 10;
+        const end = Math.min(next.length, cap);
+        for (let i = 0; i < end; i++) queue.push([...path, next[i]]);
     }
 }
 
@@ -126,15 +120,15 @@ function* yieldCombinations(lists: string[][]): Generator<string> {
 }
 
 function findNeighborKeys(hash: string): string[] {
-    const locale = getLocaleMessages();
+    const locale = u.getLocaleMessages();
     if (!locale) return [];
     const allHashes = Object.keys(locale);
     const idx = allHashes.indexOf(hash);
     if (idx === -1) return [];
 
     const nearby = allHashes.slice(Math.max(0, idx - 8), idx + 9).filter(h => h !== hash);
-    const hashMap = buildIntlHashToKeyMap();
-    return nearby.map(h => hashMap.get(h)).filter((k): k is string => !!k);
+    const hashMap = u.buildIntlHashToKeyMap();
+    return nearby.map(h => hashMap.get(h)).filter(u.isNonNullish);
 }
 
 function extractPrefixesFromKeys(keys: string[]): string[] {
@@ -333,9 +327,9 @@ function* generateCandidatesFast(words: string[], patterns: PatternData, neighbo
 }
 
 function getMessage(hash: string): string | null {
-    const locale = getLocaleMessages();
-    if (locale?.[hash]) return extractIntlText(locale[hash]);
-    return getIntlMessageFromHash(hash);
+    const locale = u.getLocaleMessages();
+    if (locale?.[hash]) return u.extractIntlText(locale[hash]);
+    return u.getIntlMessageFromHash(hash);
 }
 
 export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
@@ -343,36 +337,48 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
     const limit = args.limit ?? 20;
 
     if (action === "hash" || (key && !action)) {
-        if (!key) return { error: true, message: "key required" };
-        const h = runtimeHashMessageKey(key);
+        if (!key) return u.missingArg("key");
+        const h = u.runtimeHashMessageKey(key);
         const msg = getMessage(h);
         const exists = !!msg;
         return { key, hash: h, find: `#{intl::${key}}`, message: msg, exists, warning: exists ? undefined : "Key not in Discord intl definitions, hash may be invalid" };
     }
 
     if (action === "reverse" || (hash && !action && !key)) {
-        if (!hash) return { error: true, message: "hash required" };
-        const k = getIntlKeyFromHash(hash);
-        return { hash, key: k, find: k ? `#{intl::${k}}` : null, message: getMessage(hash) };
+        if (!hash) return u.missingArg("hash");
+        if (!/^[A-Za-z0-9+/]{6}$/.test(hash)) {
+            return { error: true, message: `Invalid hash format: expected 6 base64 chars, got "${hash}" (${hash.length} chars)` };
+        }
+        const k = u.getIntlKeyFromHash(hash);
+        const msg = getMessage(hash);
+        const exists = !!msg && msg !== hash;
+        return {
+            hash,
+            key: k,
+            find: k ? `#{intl::${k}}` : null,
+            message: exists ? msg : null,
+            exists,
+            warning: exists ? undefined : "Hash not found in Discord intl definitions",
+        };
     }
 
     if (action === "search" || (query && !action)) {
-        if (!query) return { error: true, message: "query required" };
+        if (!query) return u.missingArg("query");
 
         const searchTerms = query
             .toLowerCase()
             .split(/\s+/)
             .filter(w => w.length >= 2);
         const queryLower = query.toLowerCase();
-        const locale = getLocaleMessages();
+        const locale = u.getLocaleMessages();
         if (!locale) return { query, count: 0, matches: [] };
 
-        const hashMap = buildIntlHashToKeyMap();
+        const hashMap = u.buildIntlHashToKeyMap();
         const exact: Array<{ hash: string; message: string; key?: string }> = [];
         const partial: Array<{ hash: string; message: string; key?: string }> = [];
 
         for (const [h, arr] of Object.entries(locale)) {
-            const text = extractIntlText(arr);
+            const text = u.extractIntlText(arr);
             if (!text) continue;
 
             const lower = text.toLowerCase();
@@ -399,7 +405,7 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
     }
 
     if (action === "scan" && moduleId) {
-        const source = getModuleSource(moduleId);
+        const source = u.getModuleSource(moduleId);
         if (!source) return { error: true, message: `module ${moduleId} not found` };
 
         const hashPatterns = [createIntlHashDotRegex(), createIntlHashBracketRegex(), /intl\.string\(\w+\.t\.([A-Za-z0-9+/]{6})\)/g, /"([A-Za-z0-9+/]{6})":\s*\[/g];
@@ -413,22 +419,22 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
         }
 
         const results = [...found].map(h => {
-            const k = getIntlKeyFromHash(h);
+            const k = u.getIntlKeyFromHash(h);
             return { hash: h, key: k, find: k ? `#{intl::${k}}` : `#{intl::${h}::raw}`, message: getMessage(h) };
         });
         return { moduleId, count: found.size, hashes: results };
     }
 
     if (action === "targets") {
-        if (!key) return { error: true, message: "key required" };
-        const h = runtimeHashMessageKey(key);
+        if (!key) return u.missingArg("key");
+        const h = u.runtimeHashMessageKey(key);
         const dotUsage = `.t.${h}`;
         const bracketUsage = `.t["${h}"]`;
         return {
             key,
             hash: h,
             message: getMessage(h),
-            modules: searchModulesOptimized(src => src.includes(dotUsage) || src.includes(bracketUsage), limit),
+            modules: u.searchModulesOptimized(src => src.includes(dotUsage) || src.includes(bracketUsage), limit),
         };
     }
 
@@ -443,14 +449,14 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
             const msg = getMessage(hash);
             let tested = 0;
 
-            for (const k of Object.values(KEY_MAP)) {
+            for (const k of Object.values(u.KEY_MAP)) {
                 tested++;
-                if (runtimeHashMessageKey(k) === hash) {
+                if (u.runtimeHashMessageKey(k) === hash) {
                     return { hash, message: msg?.slice(0, 100), found: k, find: `#{intl::${k}}`, tested, source: "keymap" };
                 }
             }
 
-            const pluginKey = buildIntlHashToKeyMap().get(hash);
+            const pluginKey = u.buildIntlHashToKeyMap().get(hash);
             if (pluginKey) {
                 return { hash, message: msg?.slice(0, 100), found: pluginKey, find: `#{intl::${pluginKey}}`, tested, source: "plugins" };
             }
@@ -464,13 +470,17 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
                 let exhausted = true;
                 let burstEnd = Date.now() + BURST_MS;
 
+                const MAX_SEEN = 2_000_000;
                 for (const candidate of generateCandidates(words, patterns, neighborKeys)) {
-                    if (candidate.length < 2 || candidate.length > 80 || seen.has(candidate)) continue;
-
-                    seen.add(candidate);
+                    if (candidate.length < 2 || candidate.length > 80) continue;
+                    if (seen.size < MAX_SEEN) {
+                        if (seen.has(candidate)) continue;
+                        seen.add(candidate);
+                    }
                     tested++;
 
-                    if (runtimeHashMessageKey(candidate) === hash) {
+                    if (u.runtimeHashMessageKey(candidate) === hash) {
+                        u.addToKeyMap({ [hash]: candidate });
                         return { hash, message: msg.slice(0, 100), found: candidate, find: `#{intl::${candidate}}`, tested, source: "generated", neighborContext: neighborKeys.slice(0, 5) };
                     }
 
@@ -508,17 +518,17 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
             };
         }
 
-        const locale = getLocaleMessages();
+        const locale = u.getLocaleMessages();
         if (!locale) return { error: true, message: "Could not find intl definitions module" };
 
-        const hashMap = buildIntlHashToKeyMap();
+        const hashMap = u.buildIntlHashToKeyMap();
         const allHashes = Object.keys(locale).filter(k => k !== "default" && k !== "__esModule");
         const unknownHashes = new Set<string>();
         const unknownEntries: Array<{ hash: string; msg: string }> = [];
 
         for (const h of allHashes) {
             if (hashMap.has(h)) continue;
-            const msg = extractIntlText(locale[h]);
+            const msg = u.extractIntlText(locale[h]);
             if (!msg || msg.length < 4) continue;
             unknownHashes.add(h);
             unknownEntries.push({ hash: h, msg });
@@ -528,7 +538,7 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
         if (!totalUnknown) return { total: allHashes.length, found: [], foundCount: 0, unknownCount: 0, message: "All hashes are already known" };
 
         const found: Array<{ hash: string; key: string; message: string }> = [];
-        const seen = new Set<string>(Object.values(KEY_MAP));
+        const seen = new Set<string>(Object.values(u.KEY_MAP));
         let tested = 0;
         let exhausted = true;
         const deadline = Date.now() + BATCH_DEADLINE_MS;
@@ -536,11 +546,15 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
 
         const unknownMap = new Map(unknownEntries.map(e => [e.hash, e.msg]));
 
+        const MAX_SEEN = 2_000_000;
         const tryCandidate = (candidate: string) => {
-            if (candidate.length < 2 || candidate.length > 80 || seen.has(candidate)) return;
-            seen.add(candidate);
+            if (candidate.length < 2 || candidate.length > 80) return;
+            if (seen.size < MAX_SEEN) {
+                if (seen.has(candidate)) return;
+                seen.add(candidate);
+            }
             tested++;
-            const h = runtimeHashMessageKey(candidate);
+            const h = u.runtimeHashMessageKey(candidate);
             if (unknownHashes.has(h)) {
                 found.push({ hash: h, key: candidate, message: (unknownMap.get(h) ?? "").slice(0, 120) });
                 unknownHashes.delete(h);
@@ -570,40 +584,46 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
 
         if (!found.length) return { total: allHashes.length, tested, foundCount: 0, initialUnknown: totalUnknown, remainingUnknown: unknownHashes.size, exhausted };
 
-        const orderedHashes = getOrderedIntlHashes();
+        const orderedHashes = u.getOrderedIntlHashes();
         if (orderedHashes) {
             const posMap = new Map(orderedHashes.map((h, i) => [h, i]));
             found.sort((a, b) => (posMap.get(a.hash) ?? Infinity) - (posMap.get(b.hash) ?? Infinity));
 
-            const knownSet = new Set(Object.keys(KEY_MAP));
+            const knownSet = new Set(Object.keys(u.KEY_MAP));
             for (const entry of found) {
                 const pos = posMap.get(entry.hash);
                 if (pos == null) continue;
                 for (let i = pos - 1; i >= 0; i--) {
                     if (knownSet.has(orderedHashes[i])) {
                         (entry as Record<string, unknown>).afterHash = orderedHashes[i];
-                        (entry as Record<string, unknown>).afterKey = KEY_MAP[orderedHashes[i]];
+                        (entry as Record<string, unknown>).afterKey = u.KEY_MAP[orderedHashes[i]];
                         break;
                     }
                 }
             }
         }
 
+        if (found.length) {
+            const newEntries: Record<string, string> = {};
+            for (const f of found) newEntries[f.hash] = f.key;
+            u.addToKeyMap(newEntries);
+        }
+
         return { total: allHashes.length, tested, foundCount: found.length, initialUnknown: totalUnknown, remainingUnknown: unknownHashes.size, exhausted, results: found };
     }
 
     if (action === "unknown") {
-        const locale = getLocaleMessages();
+        const locale = u.getLocaleMessages();
         if (!locale) return { error: true, message: "Could not find intl definitions module" };
 
-        const hashMap = buildIntlHashToKeyMap();
+        const hashMap = u.buildIntlHashToKeyMap();
         const allHashes = Object.keys(locale).filter(k => k !== "default" && k !== "__esModule");
         const unknown: Array<{ hash: string; message: string }> = [];
         const filterQuery = query?.toLowerCase();
 
         for (const h of allHashes) {
             if (hashMap.has(h)) continue;
-            const msg = extractIntlText(locale[h]);
+            const msg = u.extractIntlText(locale[h]);
             if (!msg || msg.length < 2) continue;
             if (filterQuery && !msg.toLowerCase().includes(filterQuery)) continue;
             unknown.push({ hash: h, message: msg.slice(0, 120) });
@@ -628,7 +648,7 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
 
         const tryKey = (candidate: string) => {
             tested++;
-            const h = runtimeHashMessageKey(candidate);
+            const h = u.runtimeHashMessageKey(candidate);
             if (targetSet.has(h)) {
                 results.get(h)!.matches.push(candidate);
             }
@@ -663,7 +683,7 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
                 }
                 const name = placeholders[idx];
                 for (const val of parts[name] ?? [""]) {
-                    expand(idx + 1, current.replace(`{${name}}`, val));
+                    expand(idx + 1, current.replaceAll(`{${name}}`, val));
                 }
             };
 
@@ -683,8 +703,86 @@ export async function handleIntlTool(args: IntlToolArgs): Promise<unknown> {
             }
         }
 
+        if (found.length) {
+            const newEntries: Record<string, string> = {};
+            for (const f of found) newEntries[f.hash] = f.key;
+            u.addToKeyMap(newEntries);
+        }
+
         return { tested, found, notFound };
     }
 
-    return { error: true, message: "action: hash, reverse, search, scan, targets, bruteforce, test, unknown" };
+    if (action === "neighbors") {
+        if (!hash) return u.missingArg("hash");
+
+        const locale = u.getLocaleMessages();
+        if (!locale) return { error: true, message: "Could not find intl definitions module" };
+
+        const orderedHashes = u.getOrderedIntlHashes();
+        const hashMap = u.buildIntlHashToKeyMap();
+        const msg = getMessage(hash);
+        const key = hashMap.get(hash);
+
+        const radius = Math.min(limit, 50);
+
+        if (orderedHashes) {
+            const idx = orderedHashes.indexOf(hash);
+            if (idx === -1) return { error: true, message: `Hash "${hash}" not found in ordered intl module` };
+
+            const neighbors: Array<{ hash: string; key: string | null; message: string | null; position: number }> = [];
+            for (let i = Math.max(0, idx - radius); i <= Math.min(orderedHashes.length - 1, idx + radius); i++) {
+                if (i === idx) continue;
+                const nh = orderedHashes[i];
+                neighbors.push({
+                    hash: nh,
+                    key: hashMap.get(nh) ?? null,
+                    message: getMessage(nh)?.slice(0, 120) ?? null,
+                    position: i - idx,
+                });
+            }
+
+            const knownNeighbors = neighbors.filter(n => n.key);
+            const unknownNeighbors = neighbors.filter(n => !n.key);
+            const commonPrefixes = extractPrefixesFromKeys(knownNeighbors.map(n => n.key!));
+
+            return {
+                hash,
+                key,
+                message: msg?.slice(0, 200),
+                position: idx,
+                neighbors,
+                knownCount: knownNeighbors.length,
+                unknownCount: unknownNeighbors.length,
+                commonPrefixes: commonPrefixes.slice(0, 20),
+                hint: knownNeighbors.length
+                    ? `Nearby known keys share these prefixes: ${commonPrefixes.slice(0, 5).join(", ")}. Use intl test with these prefixes combined with words from the message.`
+                    : "No known keys nearby. Try bruteforce with hash= first.",
+            };
+        }
+
+        const allHashes = Object.keys(locale);
+        const idx = allHashes.indexOf(hash);
+        if (idx === -1) return { hash, key, message: msg, found: false };
+
+        const neighbors: Array<{ hash: string; key: string | null; message: string | null; position: number }> = [];
+        for (let i = Math.max(0, idx - radius); i <= Math.min(allHashes.length - 1, idx + radius); i++) {
+            if (i === idx) continue;
+            const nh = allHashes[i];
+            neighbors.push({
+                hash: nh,
+                key: hashMap.get(nh) ?? null,
+                message: getMessage(nh)?.slice(0, 120) ?? null,
+                position: i - idx,
+            });
+        }
+
+        return { hash, key, message: msg?.slice(0, 200), position: idx, neighbors, source: "locale" };
+    }
+
+    if (action === "clearCache") {
+        u.clearIntlCache();
+        return { message: "Intl hash-to-key cache cleared. Next bruteforce/search will rebuild from current KEY_MAP." };
+    }
+
+    return { error: true, message: "action: hash, reverse, search, scan, targets, bruteforce, test, unknown, neighbors, clearCache" };
 }

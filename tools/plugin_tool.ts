@@ -6,10 +6,14 @@
 
 import { canonicalizeMatch } from "@utils/patches";
 
-import { PluginOption, PluginToolArgs, ToolResult, VencordPlugin } from "../types";
-import { pluginSettings, plugins, startPlugin, stopPlugin } from "../webpack";
+import { PluginOption, PluginToolArgs, ToolResult } from "../types";
+import { plugins, pluginSettings, startPlugin, stopPlugin } from "../webpack";
 import { LIMITS, OPTION_TYPE_NAMES } from "./constants";
-import { countModuleMatchesFast } from "./utils";
+import * as u from "./utils";
+
+function ensurePluginSettings(name: string) {
+    return (pluginSettings[name] ??= {});
+}
 
 export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult> {
     const { action, name, setting: settingKey, value: settingValue } = args;
@@ -17,16 +21,14 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
     const validate = args.validate ?? false;
 
     const findPlugin = (filter: string) => {
-        const plugin = plugins[filter] as VencordPlugin | undefined;
+        const plugin = plugins[filter];
         if (plugin) return { plugin, name: filter };
-        const similar = Object.keys(plugins)
-            .filter(n => n.toLowerCase().includes(filter.toLowerCase()))
-            .slice(0, LIMITS.PLUGIN.SUGGESTIONS);
+        const similar = u.rankedSuggestions(Object.keys(plugins), filter, LIMITS.PLUGIN.SUGGESTIONS);
         return { error: true, message: `Plugin "${filter}" not found`, suggestions: similar.length ? similar : undefined };
     };
 
     if (action === "enable" || action === "disable" || action === "toggle") {
-        if (!name) return { error: true, message: "name required for enable/disable/toggle" };
+        if (!name) return u.missingArg("name");
 
         const result = findPlugin(name);
         if ("error" in result) return result;
@@ -41,25 +43,26 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
             return { success: true, name: pluginName, enabled: isEnabled, message: `Already ${isEnabled ? "enabled" : "disabled"}` };
         }
 
+        const settings = ensurePluginSettings(pluginName);
         const hasPatches = plugin.patches?.length;
         if (hasPatches) {
-            pluginSettings[pluginName].enabled = shouldEnable;
+            settings.enabled = shouldEnable;
             return { success: true, name: pluginName, enabled: shouldEnable, requiresRestart: true, message: `${shouldEnable ? "Enabled" : "Disabled"}, restart required` };
         }
 
         if (shouldEnable) {
-            pluginSettings[pluginName].enabled = true;
+            settings.enabled = true;
             const success = startPlugin(plugin as Parameters<typeof startPlugin>[0]);
             return { success, name: pluginName, enabled: success, message: success ? "Enabled" : "Failed to start" };
         }
 
         const success = stopPlugin(plugin as Parameters<typeof stopPlugin>[0]);
-        if (success) pluginSettings[pluginName].enabled = false;
+        if (success) settings.enabled = false;
         return { success, name: pluginName, enabled: !success, message: success ? "Disabled" : "Failed to stop" };
     }
 
     if (action === "settings" || action === "setSetting") {
-        if (!name) return { error: true, message: "name required for settings actions" };
+        if (!name) return u.missingArg("name");
 
         const result = findPlugin(name);
         if ("error" in result) return result;
@@ -72,10 +75,10 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
             const settingsInfo: Record<string, { type: string; description?: string; currentValue: unknown; default?: unknown; options?: unknown }> = {};
 
             for (const [key, opt] of Object.entries(options) as [string, PluginOption][]) {
-                const o = opt as unknown as Record<string, unknown>;
+                const o = opt as PluginOption & { description?: string; default?: unknown; options?: unknown };
                 settingsInfo[key] = {
                     type: OPTION_TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN",
-                    description: o.description as string | undefined,
+                    description: o.description,
                     currentValue: currentSettings[key] ?? o.default,
                     default: o.default,
                     options: o.options,
@@ -85,21 +88,18 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
             return { name: pluginName, enabled: plugin.started ?? false, settingsCount: Object.keys(options).length, settings: settingsInfo };
         }
 
-        if (!settingKey) return { error: true, message: "setting key required for setSetting" };
+        if (!settingKey) return u.missingArg("setting");
         if (!(settingKey in options)) {
             return { error: true, message: `Setting "${settingKey}" not found`, availableSettings: Object.keys(options) };
         }
 
         const oldValue = currentSettings[settingKey];
-        pluginSettings[pluginName][settingKey] = settingValue;
+        ensurePluginSettings(pluginName)[settingKey] = settingValue;
         return { success: true, name: pluginName, setting: settingKey, oldValue, newValue: settingValue };
     }
 
-    let pluginList = Object.entries(plugins) as [string, VencordPlugin][];
-    if (name) {
-        const lower = name.toLowerCase();
-        pluginList = pluginList.filter(([nm]) => nm.toLowerCase().includes(lower));
-    }
+    let pluginList = Object.entries(plugins);
+    if (name) pluginList = u.filterByLowerIncludes(pluginList, name, ([nm]) => nm);
 
     const maxPlugins = name ? LIMITS.PLUGIN.LIST_MAX_FILTERED : LIMITS.PLUGIN.LIST_MAX_DEFAULT;
     const pluginInfos = pluginList.slice(0, maxPlugins).map(([nm, plugin]) => {
@@ -114,25 +114,18 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
 
         if (showPatches && plugin.patches) {
             info.patches = plugin.patches.slice(0, LIMITS.PLUGIN.PATCHES_SLICE).map(p => ({
-                find: String(typeof p.find === "string" ? p.find : p.find).slice(0, LIMITS.PLUGIN.FIND_SLICE),
+                find: u.patchFindAsString(p.find).slice(0, LIMITS.PLUGIN.FIND_SLICE),
                 replacementCount: Array.isArray(p.replacement) ? p.replacement.length : 1,
             }));
         }
 
         if (validate && plugin.patches) {
-            let ok = 0,
-                broken = 0;
-            for (const patch of plugin.patches) {
-                const rawFind = typeof patch.find === "string" ? patch.find : (patch.find?.toString() ?? "");
-                const count = countModuleMatchesFast(canonicalizeMatch(rawFind), 2);
-                if (count === 1) ok++;
-                else broken++;
-            }
-            info.health = {
-                ok,
-                broken,
-                status: broken === 0 ? "HEALTHY" : broken < plugin.patches.length / 2 ? "DEGRADED" : "BROKEN",
-            };
+            const ok = plugin.patches.filter(p => {
+                const canon = p.find != null ? canonicalizeMatch(p.find) : "";
+                return u.countModuleMatchesFast(typeof canon === "string" ? canon : canon.source, 2) === 1;
+            }).length;
+            const broken = plugin.patches.length - ok;
+            info.health = { ok, broken, status: broken === 0 ? "HEALTHY" : broken < plugin.patches.length / 2 ? "DEGRADED" : "BROKEN" };
         }
 
         return info;

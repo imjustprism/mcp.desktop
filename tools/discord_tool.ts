@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { ChannelStore, GuildStore, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
+import { ChannelStore, DateUtils, GuildStore, Humanize, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
 
 import { DiscordAPIError, DiscordToolArgs, ToolResult } from "../types";
 import {
@@ -20,7 +20,7 @@ import {
     PlatformUtilsModule,
 } from "../webpack";
 import { LIMITS } from "./constants";
-import { serializeResult } from "./utils";
+import * as u from "./utils";
 
 export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResult> {
     const { action, method, endpoint, body, id, filter: filterPattern, memberName } = args;
@@ -33,31 +33,35 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
 
         try {
             const response = await apiCall({ url: endpoint, body });
-            const respBody = typeof response.body === "object" && response.body !== null ? serializeResult(response.body, LIMITS.DISCORD.API_SERIALIZE) : response.body;
+            const respBody = typeof response.body === "object" && response.body !== null ? u.serializeResult(response.body, LIMITS.DISCORD.API_SERIALIZE) : response.body;
             return { status: response.status, body: respBody };
         } catch (e) {
             const err = e as DiscordAPIError;
-            return { error: true, status: err.status ?? err.httpStatus, message: err.body?.message ?? err.message ?? String(e) };
+            const msg = err.body?.message ?? err.message ?? String(e);
+            u.mcpLogger.error(`discord api ${method} ${endpoint}: ${msg}`);
+            return { error: true, status: err.status ?? err.httpStatus, message: msg };
         }
     }
 
     if (action === "snowflake") {
-        if (!id) return { error: true, message: "id required" };
+        if (!id) return u.missingArg("id");
 
         try {
             const utils = getSnowflakeUtils();
             const timestamp = utils.extractTimestamp(id);
             const date = new Date(timestamp);
+            const snowflake = BigInt(id);
             return {
                 id,
                 valid: utils.isProbablyAValidSnowflake(id),
                 timestamp,
                 date: date.toISOString(),
                 unix: Math.floor(timestamp / 1000),
-                age: `${Math.floor((Date.now() - timestamp) / 86400000)} days ago`,
-                workerId: Number((BigInt(id) & 0x3e0000n) >> 17n),
-                processId: Number((BigInt(id) & 0x1f000n) >> 12n),
-                increment: Number(BigInt(id) & 0xfffn),
+                age: Humanize.relativeTime(date as unknown as number),
+                humanDate: DateUtils.calendarFormat(date),
+                workerId: Number((snowflake & 0x3e0000n) >> 17n),
+                processId: Number((snowflake & 0x1f000n) >> 12n),
+                increment: Number(snowflake & 0xfffn),
             };
         } catch {
             return { error: true, message: "Invalid snowflake ID" };
@@ -81,7 +85,11 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             endpoints: Object.fromEntries(
                 entries
                     .slice(0, maxEndpoints)
-                    .map(([k, v]) => [k, typeof v === "function" ? (v as (id1: string, id2: string) => string)("ID1", "ID2").slice(0, LIMITS.DISCORD.ENDPOINT_VALUE_SLICE) : v]),
+                    .map(([k, v]) => {
+                        if (typeof v !== "function") return [k, v];
+                        try { return [k, (v as (id1: string, id2: string) => string)("ID1", "ID2").slice(0, LIMITS.DISCORD.ENDPOINT_VALUE_SLICE)]; }
+                        catch { return [k, "(function)"]; }
+                    }),
             ),
             note: entries.length > maxEndpoints ? "Use filter to narrow" : undefined,
         };
@@ -107,7 +115,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
     }
 
     if (action === "enum") {
-        if (!memberName) return { error: true, message: "memberName required" };
+        if (!memberName) return u.missingArg("memberName");
 
         const mods = findAll(m => {
             if (!m || typeof m !== "object") return false;
@@ -125,7 +133,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
     }
 
     if (action === "memory") {
-        const { memory } = performance as unknown as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } };
+        const { memory } = performance as any as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } };
         if (!memory) return { error: true, message: "Memory API not available" };
 
         return {
@@ -159,7 +167,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             resourceStats.totalSize += r.transferSize ?? 0;
         }
 
-        resourceStats.slowest = resources
+        resourceStats.slowest = [...resources]
             .sort((a, b) => b.duration - a.duration)
             .slice(0, LIMITS.DISCORD.SLOWEST_RESOURCES)
             .map(r => ({ name: r.name.split("/").pop()?.slice(0, LIMITS.DISCORD.RESOURCE_NAME_SLICE) ?? "", duration: Math.round(r.duration) }));
@@ -283,7 +291,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
         if (!PlatformUtilsModule) return { error: true, message: "PlatformUtils not found" };
 
         const p = PlatformUtilsModule;
-        const env = (window as unknown as Record<string, unknown>).GLOBAL_ENV as Record<string, unknown> | undefined;
+        const env = (window as any).GLOBAL_ENV as Record<string, unknown> | undefined;
 
         const safeBoolCall = (fn: unknown) => {
             try {
@@ -354,14 +362,30 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
     if (action === "icons") {
         if (!IconUtilsModule) return { error: true, message: "IconUtils not found" };
 
-        const functions = Object.keys(IconUtilsModule)
-            .filter(k => typeof IconUtilsModule[k] === "function")
-            .slice(0, LIMITS.DISCORD.ICON_UTIL_FUNCTIONS);
+        const all = Object.keys(IconUtilsModule).filter(k => typeof IconUtilsModule[k] === "function");
+        const matched = args.filter ? all.filter(k => k.toLowerCase().includes(args.filter!.toLowerCase())) : all;
+        const functions = matched.slice(0, LIMITS.DISCORD.ICON_UTIL_FUNCTIONS);
 
         return {
+            total: all.length,
+            filtered: matched.length,
             functionCount: functions.length,
             functions,
             tip: "Use evaluateCode to call functions, e.g. IconUtils.getUserAvatarURL(user)",
+        };
+    }
+
+    if (action === "buildInfo") {
+        const env = (window as any).GLOBAL_ENV as Record<string, unknown> | undefined;
+        const p = PlatformUtilsModule;
+        return {
+            buildNumber: env?.BUILD_NUMBER ?? null,
+            versionHash: env?.VERSION_HASH ?? null,
+            releaseChannel: env?.RELEASE_CHANNEL ?? null,
+            apiEndpoint: env?.API_ENDPOINT ?? null,
+            platform: p?.getPlatform?.() ?? null,
+            os: p?.getOS?.() ?? null,
+            nativeBuildNumber: env?.NATIVE_BUILD_NUMBER ?? null,
         };
     }
 

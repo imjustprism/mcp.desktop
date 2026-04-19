@@ -7,13 +7,13 @@
 import { FunctionIntercept, InterceptCapture, InterceptToolArgs, WebpackModule } from "../types";
 import { wreq } from "../webpack";
 import { LIMITS } from "./constants";
-import { cleanupAllIntercepts, cleanupExpiredIntercepts, cleanupIntercept, collectMethods, interceptState, serializeResult } from "./utils";
+import * as u from "./utils";
 
 function summarizeIntercept(captures: InterceptCapture[], limit: number) {
     const sliced = captures.slice(0, limit).map(c => {
         const summary: Record<string, unknown> = { ts: c.ts };
-        if (c.args.length) summary.args = serializeResult(c.args, LIMITS.INTERCEPT.SUMMARIZE_ARGS);
-        if (c.result !== undefined) summary.result = serializeResult(c.result, LIMITS.INTERCEPT.SUMMARIZE_RESULT);
+        if (c.args.length) summary.args = u.serializeResult(c.args, LIMITS.INTERCEPT.SUMMARIZE_ARGS);
+        if (c.result !== undefined) summary.result = u.serializeResult(c.result, LIMITS.INTERCEPT.SUMMARIZE_RESULT);
         if (c.error) summary.error = c.error;
         return summary;
     });
@@ -23,10 +23,10 @@ function summarizeIntercept(captures: InterceptCapture[], limit: number) {
 export async function handleInterceptTool(args: InterceptToolArgs): Promise<unknown> {
     const { action, id: interceptId, moduleId } = args;
     const exportKey = args.exportKey ?? "default";
-    const duration = Math.min(Math.max(args.duration ?? 30000, 5000), 120000);
+    const duration = u.clamp(args.duration, 30000, 5000, 120000);
     const maxCaptures = Math.min(args.maxCaptures ?? 50, 200);
 
-    cleanupExpiredIntercepts();
+    u.cleanupExpiredIntercepts();
 
     if (action === "set" && moduleId) {
         const mod = wreq.c[moduleId] as WebpackModule | undefined;
@@ -50,7 +50,7 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
             }
             target = (parent as Record<string, unknown>)[method];
             if (typeof target !== "function") {
-                return { error: true, message: `"${parentKey}.${method}" is not a function`, availableMethods: collectMethods(parent, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS) };
+                return { error: true, message: `"${parentKey}.${method}" is not a function`, availableMethods: u.collectMethods(parent, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS) };
             }
             methodKey = method;
             methodParent = parent as Record<string, unknown>;
@@ -64,11 +64,11 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
                 .filter(k => typeof mod.exports[k] === "function")
                 .slice(0, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS);
 
-            const methods = collectMethods(target, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS);
+            const methods = u.collectMethods(target, LIMITS.INTERCEPT.AVAILABLE_FUNCTIONS);
             const exportObjects = Object.keys(mod.exports)
-                .filter(k => typeof mod.exports[k] === "object" && mod.exports[k] && collectMethods(mod.exports[k]).length > 0)
+                .filter(k => typeof mod.exports[k] === "object" && mod.exports[k] && u.collectMethods(mod.exports[k]).length > 0)
                 .slice(0, 5)
-                .map(k => ({ key: k, displayName: (mod.exports[k] as { displayName?: string })?.displayName, methodCount: collectMethods(mod.exports[k]).length }));
+                .map(k => ({ key: k, displayName: (mod.exports[k] as { displayName?: string })?.displayName, methodCount: u.collectMethods(mod.exports[k]).length }));
 
             return {
                 error: true,
@@ -84,7 +84,7 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
             };
         }
 
-        const id = interceptState.nextId++;
+        const id = u.interceptState.nextId++;
         const intercept: FunctionIntercept = {
             id,
             moduleId,
@@ -98,9 +98,13 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
         };
 
         const wrapper = function (this: unknown, ...fnArgs: unknown[]) {
-            const capture: InterceptCapture = { ts: Date.now(), args: fnArgs };
+            if (Date.now() >= intercept.expiresAt) {
+                u.cleanupIntercept(id);
+                return intercept.original.apply(this, fnArgs);
+            }
 
             if (intercept.captures.length < intercept.maxCaptures) {
+                const capture: InterceptCapture = { ts: Date.now(), args: fnArgs };
                 try {
                     const res = intercept.original.apply(this, fnArgs);
                     capture.result = res;
@@ -125,16 +129,17 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
                 Object.defineProperty(mod.exports, actualKey, { value: wrapper, configurable: true, writable: true });
             }
         } catch {
+            u.mcpLogger.warn(`intercept: ${moduleId}.${actualKey} not configurable`);
             return { error: true, message: `${moduleId}.${actualKey} not configurable` };
         }
 
-        interceptState.active.set(id, intercept);
+        u.interceptState.active.set(id, intercept);
         return { id, moduleId, exportKey: actualKey, duration, maxCaptures };
     }
 
     if (action === "get") {
         if (interceptId === undefined) {
-            const intercepts = [...interceptState.active.values()].map(i => ({
+            const intercepts = [...u.interceptState.active.values()].map(i => ({
                 id: i.id,
                 moduleId: i.moduleId,
                 exportKey: i.exportKey,
@@ -144,7 +149,7 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
             return { activeIntercepts: intercepts.length, intercepts };
         }
 
-        const intercept = interceptState.active.get(interceptId);
+        const intercept = u.interceptState.active.get(interceptId);
         if (!intercept) return { error: true, message: `Intercept ${interceptId} not found or expired` };
 
         const summary = summarizeIntercept(intercept.captures, LIMITS.INTERCEPT.GET_CAPTURE_SLICE);
@@ -160,16 +165,16 @@ export async function handleInterceptTool(args: InterceptToolArgs): Promise<unkn
 
     if (action === "stop") {
         if (interceptId === undefined) {
-            const count = interceptState.active.size;
-            cleanupAllIntercepts();
+            const count = u.interceptState.active.size;
+            u.cleanupAllIntercepts();
             return { stopped: count };
         }
 
-        const intercept = interceptState.active.get(interceptId);
+        const intercept = u.interceptState.active.get(interceptId);
         if (!intercept) return { error: true, message: `Intercept ${interceptId} not found` };
 
         const { captures } = intercept;
-        cleanupIntercept(interceptId);
+        u.cleanupIntercept(interceptId);
         const summary = summarizeIntercept(captures, LIMITS.INTERCEPT.STOP_CAPTURE_SLICE);
         return { id: interceptId, stopped: true, captureCount: captures.length, ...summary };
     }

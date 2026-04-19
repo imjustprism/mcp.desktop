@@ -7,7 +7,17 @@
 import { StoreToolArgs, ToolResult } from "../types";
 import { getFluxDispatcherInternal, resolveStore } from "../webpack";
 import { LIMITS } from "./constants";
-import { findStore, getAllStoreNames, serializeResult } from "./utils";
+import * as u from "./utils";
+
+function cap(v: unknown, max: number = LIMITS.STORE.SERIALIZE_CALL): unknown {
+    return u.isObject(v) ? u.serializeResult(v, max) : v;
+}
+function typeOf(v: unknown): string {
+    if (v === null) return "null";
+    if (v === undefined) return "undefined";
+    if (Array.isArray(v)) return "array";
+    return typeof v;
+}
 
 export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> {
     const { action, name: storeName, method, args: methodArgs } = args;
@@ -15,45 +25,40 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
     const includeTypes = args.includeTypes ?? false;
 
     if (action === "list" || (!action && !storeName)) {
-        const stores = getAllStoreNames();
+        const all = u.getAllStoreNames();
+        const filtered = storeName ? u.filterByLowerIncludes(all, storeName, s => s) : all;
         return {
-            count: stores.length,
-            stores: stores.slice(0, LIMITS.STORE.LIST_SLICE),
-            note: stores.length > LIMITS.STORE.LIST_SLICE ? "Use filter to narrow" : undefined,
+            count: filtered.length,
+            stores: filtered.slice(0, LIMITS.STORE.LIST_SLICE),
+            note: filtered.length > LIMITS.STORE.LIST_SLICE ? "Use name to narrow further" : undefined,
         };
     }
 
-    if (!storeName) return { error: true, message: "name required for store operations" };
+    if (!storeName) return u.missingArg("name");
 
     const resolved = resolveStore(storeName);
     const resolvedName = resolved?.name ?? storeName;
     const store = resolved?.store ?? null;
 
     if (!store) {
-        const validStores = getAllStoreNames();
-        const lower = storeName.toLowerCase();
-        const starts = validStores.filter(s => s.toLowerCase().startsWith(lower));
-        const contains = validStores.filter(s => s.toLowerCase().includes(lower) && !s.toLowerCase().startsWith(lower));
-        const suggestions = [...starts, ...contains].slice(0, LIMITS.STORE.SUGGESTIONS);
+        const validStores = u.getAllStoreNames();
+        const suggestions = u.rankedSuggestions(validStores, storeName, LIMITS.STORE.SUGGESTIONS);
 
         const looksLikeMethod = /^[a-z]/.test(storeName) || storeName.includes("(");
         const methodMatches: Array<{ store: string; method: string }> = [];
         if (!suggestions.length || looksLikeMethod) {
-            const methodLower = lower.replace(/[()]/g, "");
+            const methodLower = storeName.toLowerCase().replace(/[()]/g, "");
             for (const sn of validStores) {
                 if (methodMatches.length >= LIMITS.STORE.METHOD_MATCHES) break;
-                try {
-                    const s = findStore(sn as Parameters<typeof findStore>[0]) as Record<string, unknown>;
-                    const proto = Object.getPrototypeOf(s);
-                    const names = [...Object.getOwnPropertyNames(proto), ...Object.getOwnPropertyNames(s)];
-                    for (const nm of names) {
-                        if (nm.toLowerCase().includes(methodLower)) {
-                            methodMatches.push({ store: sn, method: nm });
-                            break;
-                        }
+                const s = u.safeCall<Record<string, unknown> | null>(() => u.findStore(sn) as Record<string, unknown>, null);
+                if (!s) continue;
+                const proto = u.safeProto(s);
+                const names = [...(proto ? Object.getOwnPropertyNames(proto) : []), ...Object.getOwnPropertyNames(s)];
+                for (const nm of names) {
+                    if (nm.toLowerCase().includes(methodLower)) {
+                        methodMatches.push({ store: sn, method: nm });
+                        break;
                     }
-                } catch {
-                    continue;
                 }
             }
         }
@@ -66,6 +71,26 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
     }
 
     const dispatcher = getFluxDispatcherInternal();
+
+    if (action === "snapshot") {
+        const proto = u.safeProto(store);
+        const allNames = [...new Set([...(proto ? Object.getOwnPropertyNames(proto) : []), ...Object.getOwnPropertyNames(store)])];
+        const snapshot: Record<string, unknown> = {};
+        let captured = 0;
+        for (const nm of allNames) {
+            if (nm === "constructor" || captured >= LIMITS.STORE.SNAPSHOT_MAX) continue;
+            const desc = u.getDescriptor(store, proto, nm);
+            const isZeroArgGetter = typeof store[nm] === "function" && nm.startsWith("get") && (store[nm] as Function).length === 0;
+            if (desc?.get || isZeroArgGetter) {
+                snapshot[nm] = u.safeCall(
+                    () => cap(desc?.get ? desc.get.call(store) : (store[nm] as () => unknown).call(store), LIMITS.STORE.SNAPSHOT_SERIALIZE),
+                    "<error>",
+                );
+                captured++;
+            }
+        }
+        return { store: resolvedName, snapshotAt: Date.now(), getterCount: captured, values: snapshot };
+    }
 
     if (action === "subscriptions") {
         const dispatchToken = store._dispatchToken as string | undefined;
@@ -91,33 +116,26 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
 
     if (action === "methods") {
         const levels: Array<{ level: number; methods: Array<{ name: string; type?: string }> }> = [];
-        let currentProto = Object.getPrototypeOf(store);
+        let currentProto = u.safeProto(store);
         let level = 0;
 
         while (currentProto && level < depth) {
-            const methodNames = Object.getOwnPropertyNames(currentProto)
-                .filter(k => k !== "constructor")
-                .sort();
-            const methods: Array<{ name: string; type?: string }> = [];
-
-            for (const nm of methodNames) {
+            const methodNames = Object.getOwnPropertyNames(currentProto).filter(k => k !== "constructor").sort();
+            const methods: Array<{ name: string; type?: string }> = methodNames.map(nm => {
                 const entry: { name: string; type?: string } = { name: nm };
                 if (includeTypes) {
-                    try {
+                    entry.type = u.safeCall(() => {
                         const val = store[nm];
-                        if (typeof val === "function" && nm.startsWith("get")) {
-                            const ret = (val as () => unknown).call(store);
-                            entry.type = ret === null ? "null" : Array.isArray(ret) ? "array" : typeof ret;
-                        } else entry.type = typeof val;
-                    } catch {
-                        entry.type = "unknown";
-                    }
+                        if (typeof val === "function" && nm.startsWith("get") && (val as Function).length === 0) {
+                            return typeOf((val as () => unknown).call(store));
+                        }
+                        return typeof val;
+                    }, "unknown");
                 }
-                methods.push(entry);
-            }
-
+                return entry;
+            });
             levels.push({ level, methods });
-            currentProto = Object.getPrototypeOf(currentProto);
+            currentProto = u.safeProto(currentProto);
             level++;
         }
 
@@ -130,10 +148,8 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
     }
 
     if ((action === "call" || action === "state") && method) {
-        const desc = Object.getOwnPropertyDescriptor(store, method) ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(store), method);
-
-        const cap = (v: unknown) => (typeof v === "object" && v !== null ? serializeResult(v, LIMITS.STORE.SERIALIZE_CALL) : v);
-        const typeOf = (v: unknown) => (v === null ? "null" : v === undefined ? "undefined" : Array.isArray(v) ? "array" : typeof v);
+        const storeProto = u.safeProto(store);
+        const desc = u.getDescriptor(store, storeProto, method);
 
         if (desc?.get) {
             try {
@@ -155,18 +171,18 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         }
 
         if (fn !== undefined) return { found: true, property: method, value: cap(fn), valueType: typeof fn };
-        return { found: true, error: `"${method}" not found on store` };
+        return { found: true, method, error: `"${method}" not found on store` };
     }
 
-    const proto = Object.getPrototypeOf(store);
-    const protoProps = Object.getOwnPropertyNames(proto).filter(n => n !== "constructor");
+    const proto = u.safeProto(store);
+    const protoProps = proto ? Object.getOwnPropertyNames(proto).filter(n => n !== "constructor") : [];
     const ownProps = Object.getOwnPropertyNames(store);
     const methods: string[] = [];
     const getters: string[] = [];
     const properties: string[] = [];
 
-    for (const nm of [...new Set([...protoProps, ...ownProps])]) {
-        const desc = Object.getOwnPropertyDescriptor(store, nm) ?? Object.getOwnPropertyDescriptor(proto, nm);
+    for (const nm of new Set([...protoProps, ...ownProps])) {
+        const desc = u.getDescriptor(store, proto, nm);
         if (desc?.get) getters.push(nm);
         else if (typeof store[nm] === "function") methods.push(nm);
         else properties.push(nm);

@@ -6,7 +6,7 @@
 
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
-import { Logger } from "@utils/Logger";
+import { isObject } from "@utils/misc";
 import definePlugin, { OptionType, PluginNative, ReporterTestable } from "@utils/types";
 import { Toasts } from "@webpack/common";
 
@@ -29,6 +29,7 @@ import {
     handleStoreTool,
     handleTestPatchTool,
     handleTraceTool,
+    mcpLogger as logger,
     serializeResult,
     TOOLS,
     withTimeout,
@@ -36,7 +37,6 @@ import {
 import { CacheEntry, InitializeParams, IPCMCPRequest, MCPRequest, MCPResponse, SessionStats, ToolCallParams, ToolCallResult } from "./types";
 
 const Native = VencordNative.pluginHelpers.mcp as PluginNative<typeof import("./native")>;
-const logger = new Logger("mcp", "#d97756");
 
 const toolCache = new Map<string, CacheEntry>();
 const TOOL_NAMES = new Set(TOOLS.map(t => t.name));
@@ -57,10 +57,10 @@ function getCacheKey(tool: string, args: Record<string, unknown>): string {
 
 const NON_CACHEABLE_TOOLS = new Set(["reloadDiscord", "evaluateCode"]);
 const NON_CACHEABLE_ACTIONS: Readonly<Record<string, Set<string>>> = {
-    dom: new Set(["modify"]),
+    react: new Set(["modify", "forceUpdate", "state"]),
     flux: new Set(["dispatch"]),
     discord: new Set(["api"]),
-    store: new Set(["call", "state"]),
+    store: new Set(["call", "state", "snapshot"]),
     plugin: new Set(["toggle", "enable", "disable", "setSetting"]),
     module: new Set(["loadLazy", "watch", "watchGet", "watchStop", "diff", "annotate", "extract"]),
     trace: new Set(["start", "get", "stop", "store"]),
@@ -89,7 +89,7 @@ function getCachedResult(tool: string, args: Record<string, unknown>): unknown |
 
 function setCachedResult(tool: string, args: Record<string, unknown>, result: unknown): void {
     if (!isCacheable(tool, args)) return;
-    if (result && typeof result === "object" && "error" in result) return;
+    if (isObject(result) && "error" in result) return;
     const key = getCacheKey(tool, args);
     const ttl = TOOL_CACHE_TTLS[tool] ?? DEFAULT_CACHE_TTL;
     if (toolCache.size >= MAX_CACHE_ENTRIES) {
@@ -122,7 +122,10 @@ const TOOL_HANDLERS: Record<string, ToolHandler> = {
     testPatch: handleTestPatchTool,
     trace: handleTraceTool,
     intercept: handleInterceptTool,
-    evaluateCode: (args: { code?: string }) => (0, eval)(args.code as string),
+    evaluateCode: (args: { code?: string }) => {
+        if (!args.code) return { error: true, message: "code required" };
+        return (0, eval)(args.code);
+    },
     reloadDiscord: () => {
         Native.notifyReloadTriggered();
         setTimeout(() => location.reload(), 100);
@@ -230,6 +233,8 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
             }
 
             const start = performance.now();
+            const action = params.arguments?.action as string | undefined;
+            const toolLabel = action ? `${params.name}.${action}` : params.name;
             let toolResult: ToolCallResult;
             try {
                 const timeout = getAdaptiveTimeout(params.name, params.arguments);
@@ -237,8 +242,7 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
             } catch (e) {
                 sessionStats.errors++;
                 const errorMsg = e instanceof Error ? e.message : String(e);
-                logger.error(`${params.name}: ${errorMsg}`);
-                const action = params.arguments?.action as string | undefined;
+                logger.error(`${toolLabel}: ${errorMsg}`);
                 toolResult = {
                     content: [{ type: "text", text: JSON.stringify({ error: true, message: errorMsg, tool: params.name, action: action ?? null }) }],
                     isError: true,
@@ -249,11 +253,11 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
 
             if (toolResult.isError) {
                 sessionStats.errors++;
-                logger.error(`${params.name} ${elapsed.toFixed(2)}ms`);
+                logger.error(`${toolLabel} failed (${elapsed.toFixed(0)}ms)`);
             } else if (elapsed > 5000) {
-                logger.warn(`${params.name} ${elapsed.toFixed(2)}ms`);
+                logger.warn(`${toolLabel} slow (${elapsed.toFixed(0)}ms)`);
             } else if (settings.store.logRequests) {
-                logger.info(`${params.name} ${elapsed.toFixed(2)}ms`);
+                logger.info(`${toolLabel} ${elapsed.toFixed(0)}ms`);
             }
 
             return { jsonrpc: "2.0", id, result: toolResult };
@@ -355,19 +359,17 @@ export default definePlugin({
     async start(this: PluginInstance) {
         logger.info(`Starting MCP server, ${TOOLS.length} tools available`);
 
-        Native.notifyRendererReady();
-
         const result = await Native.startServer();
-        if (result.ok) {
-            logger.info(`http://127.0.0.1:${result.port}`);
-        } else {
+        if (!result.ok) {
             logger.error("Failed to start server");
             return;
         }
+        logger.info(`http://127.0.0.1:${result.port}`);
 
         this.polling = true;
         this.idleCount = 0;
         this.poll();
+        Native.notifyRendererReady();
     },
 
     stop(this: PluginInstance) {

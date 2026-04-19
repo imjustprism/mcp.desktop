@@ -24,6 +24,7 @@ export {
     clearComponentIndexCache,
     clearCSSIndexCache,
     getAdaptiveTimeout,
+    mcpLogger,
     serializeResult,
     withTimeout,
 } from "./utils";

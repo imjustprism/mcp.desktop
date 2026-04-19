@@ -29,7 +29,7 @@ Clone this plugin into userplugins:
 
 ```bash
 cd src/userplugins
-git clone https://github.com/imjustprism/mcp.desktop
+git clone https://github.com/user/mcp.desktop
 ```
 
 Build and inject:

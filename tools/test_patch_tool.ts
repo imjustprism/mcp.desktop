@@ -7,7 +7,6 @@
 import { canonicalizeMatch } from "@utils/patches";
 
 import { AnchorInfo, FindModuleMatch, MatchDiagnostic, RegexWarning, TestPatchToolArgs } from "../types";
-import { wreq } from "../webpack";
 import {
     ANCHOR_TYPE_ORDER,
     CONTEXT,
@@ -22,26 +21,20 @@ import {
     STORE_NAME_RE,
     STRING_LITERAL_RE,
 } from "./constants";
-import { compareByAnchorType, countModuleMatchesFast, getIntlKeyFromHash, getModuleSource, parseRegex, scanSingleOccurrences } from "./utils";
+import * as u from "./utils";
 
 function findModules(findStr: string, findRegex: RegExp | null, limit: number): FindModuleMatch[] {
     const matches: FindModuleMatch[] = [];
-    for (const id of Object.keys(wreq.m)) {
+    for (const id of u.getModuleIds()) {
         if (matches.length >= limit) break;
-        const source = getModuleSource(id);
+        const source = u.getModuleSource(id);
         const matchIdx = findRegex ? source.search(findRegex) : source.indexOf(findStr);
-        if (matchIdx !== -1) {
-            const start = Math.max(0, matchIdx - CONTEXT.FIND_SNIPPET_BEFORE);
-            const end = Math.min(source.length, matchIdx + CONTEXT.FIND_SNIPPET_AFTER);
-            matches.push({ id, snippet: source.slice(start, end) });
-        }
+        if (matchIdx === -1) continue;
+        const start = Math.max(0, matchIdx - CONTEXT.FIND_SNIPPET_BEFORE);
+        const end = Math.min(source.length, matchIdx + CONTEXT.FIND_SNIPPET_AFTER);
+        matches.push({ id, snippet: source.slice(start, end) });
     }
     return matches;
-}
-
-function buildRegex(matchPattern: string): RegExp {
-    const parsed = parseRegex(matchPattern);
-    return canonicalizeMatch(parsed ?? new RegExp(matchPattern));
 }
 
 function analyzeRegex(pattern: string): RegexWarning[] {
@@ -95,10 +88,7 @@ function analyzeRegex(pattern: string): RegexWarning[] {
         }
     }
 
-    let captures = 0;
-    for (let i = 0; i < pattern.length - 1; i++) {
-        if (pattern[i] === "(" && pattern[i + 1] !== "?") captures++;
-    }
+    const captures = u.countUnescapedCaptures(pattern);
     if (captures > 4) {
         warnings.push({
             rule: "tooManyCaptures",
@@ -132,13 +122,13 @@ function analyzeRegex(pattern: string): RegexWarning[] {
     return warnings;
 }
 
-function validateReplace(replaceStr: string, captureCount: number): RegexWarning[] {
+function validateReplace(replaceStr: string, captureCount: number, matchSource = ""): RegexWarning[] {
     const warnings: RegexWarning[] = [];
-    const refs = /\$(\d+)/g;
-    let m: RegExpExecArray | null;
-    while ((m = refs.exec(replaceStr))) {
+    const referenced = new Set<number>();
+    for (const m of replaceStr.matchAll(/\$(\d+)/g)) {
         const ref = parseInt(m[1]);
-        if (ref > captureCount) {
+        referenced.add(ref);
+        if (ref > captureCount || ref < 1) {
             warnings.push({
                 rule: "invalidCaptureRef",
                 severity: "error",
@@ -146,56 +136,56 @@ function validateReplace(replaceStr: string, captureCount: number): RegexWarning
             });
         }
     }
+    for (let i = 1; i <= captureCount; i++) {
+        if (!referenced.has(i)) {
+            warnings.push({ rule: "unusedCapture", severity: "info", detail: `Capture $${i} never referenced in replace` });
+        }
+    }
+    if (matchSource) {
+        const names = u.extractCaptureNames(matchSource);
+        for (const m of replaceStr.matchAll(/\$<([A-Za-z_$][\w$]*)>/g)) {
+            if (!names.includes(m[1])) {
+                warnings.push({ rule: "invalidNamedRef", severity: "error", detail: `$<${m[1]}> references unknown named group` });
+            }
+        }
+    }
     return warnings;
+}
+
+function checkSyntaxAfterReplace(source: string, regex: RegExp, replaceStr: string): RegexWarning[] {
+    try {
+        const replaced = source.replace(regex, replaceStr);
+        try { new Function(replaced); return []; }
+        catch (e) {
+            const warning: RegexWarning = { rule: "syntaxError", severity: "error", detail: e instanceof Error ? e.message.slice(0, 200) : String(e) };
+            return [warning];
+        }
+    } catch { return []; }
 }
 
 function diagnoseMatchFailure(source: string, regex: RegExp): MatchDiagnostic {
     const src = regex.source;
+    const { flags } = regex;
+
+    const tryVariant = (mutated: string): boolean => {
+        if (mutated === src) return false;
+        return u.safeCall(() => new RegExp(mutated, flags).test(source), false);
+    };
 
     const ranges = [...src.matchAll(/\.\{(\d+),(\d+)\}/g)];
     if (ranges.length) {
         const widened = src.replace(/\.\{(\d+),(\d+)\}/g, (_, lo, hi) => `.{${lo},${Math.max(parseInt(hi) * 2, parseInt(hi) + 500)}}`);
-        try {
-            if (new RegExp(widened, regex.flags).test(source)) {
-                const details = ranges.map(r => `.{${r[1]},${r[2]}}`).join(", ");
-                return {
-                    reason: "Range too narrow",
-                    suggestion: `Widen ${details}`,
-                };
-            }
-        } catch {
-            /* */
+        if (tryVariant(widened)) {
+            return { reason: "Range too narrow", suggestion: `Widen ${ranges.map(r => `.{${r[1]},${r[2]}}`).join(", ")}` };
         }
     }
 
-    const lookbehindRe = /\(\?<[!=](?:[^()]*|\((?:[^()]*|\([^()]*\))*\))*\)/g;
-    const withoutLookbehind = src.replace(lookbehindRe, "");
-    if (withoutLookbehind !== src) {
-        try {
-            if (new RegExp(withoutLookbehind, regex.flags).test(source)) {
-                return {
-                    reason: "Lookbehind prevents match",
-                    suggestion: "Check context before match target",
-                };
-            }
-        } catch {
-            /* */
-        }
+    if (tryVariant(src.replace(/\(\?<[!=](?:[^()]*|\((?:[^()]*|\([^()]*\))*\))*\)/g, ""))) {
+        return { reason: "Lookbehind prevents match", suggestion: "Check context before match target" };
     }
 
-    const lookaheadRe = /\(\?[=!](?:[^()]*|\((?:[^()]*|\([^()]*\))*\))*\)/g;
-    const withoutLookahead = src.replace(lookaheadRe, "");
-    if (withoutLookahead !== src) {
-        try {
-            if (new RegExp(withoutLookahead, regex.flags).test(source)) {
-                return {
-                    reason: "Lookahead prevents match",
-                    suggestion: "Check context after match target",
-                };
-            }
-        } catch {
-            /* */
-        }
+    if (tryVariant(src.replace(/\(\?[=!](?:[^()]*|\((?:[^()]*|\([^()]*\))*\))*\)/g, ""))) {
+        return { reason: "Lookahead prevents match", suggestion: "Check context after match target" };
     }
 
     const literals = src
@@ -251,7 +241,7 @@ function discoverAnchors(source: string, centerIdx: number, radius: number): Anc
         seen.add(display);
         const absIdx = start + regionIdx;
         const distance = Math.abs(absIdx - centerIdx);
-        const unique = countModuleMatchesFast(raw, 3) === 1;
+        const unique = u.countModuleMatchesFast(raw, 3) === 1;
         anchors.push({ anchor: display, type, unique, distance });
     };
 
@@ -259,7 +249,7 @@ function discoverAnchors(source: string, centerIdx: number, radius: number): Anc
         let m: RegExpExecArray | null;
         while ((m = regex.exec(region))) {
             const hash = m[1];
-            const key = getIntlKeyFromHash(hash);
+            const key = u.getIntlKeyFromHash(hash);
             const display = key ? `#{intl::${key}}` : `#{intl::${hash}::raw}`;
             const searchStr = canonicalizeMatch(display);
             add(searchStr, display, "intl", m.index);
@@ -282,13 +272,13 @@ function discoverAnchors(source: string, centerIdx: number, radius: number): Anc
     ];
 
     for (const { regex, extract } of anchorScans) {
-        for (const anchor of scanSingleOccurrences(region, regex, extract)) {
+        for (const anchor of u.scanSingleOccurrences(region, regex, extract)) {
             add(anchor.search, anchor.find, anchor.type, anchor.index);
         }
     }
 
     anchors.sort((a, b) => {
-        const typeComp = compareByAnchorType(a, b, ANCHOR_TYPE_ORDER);
+        const typeComp = u.compareByAnchorType(a, b, ANCHOR_TYPE_ORDER);
         return typeComp || a.distance - b.distance;
     });
 
@@ -299,19 +289,20 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
     const { find: rawFind, match: matchPattern, replace: replaceStr } = args;
 
     if (!rawFind || rawFind.length < 3) return { error: true, message: "find required (min 3 chars)" };
-    if (!matchPattern) return { error: true, message: "match required" };
+    if (!matchPattern) return u.missingArg("match");
 
     const findStr = canonicalizeMatch(rawFind);
     const findRegex = typeof findStr === "string" && findStr.startsWith("(?:") ? new RegExp(findStr) : null;
-    const moduleMatches = findModules(findStr as string, findRegex, 6);
+    const moduleMatches = findModules(findStr, findRegex, 6);
     const findUnique = moduleMatches.length === 1;
-    const targetModule = moduleMatches[0] ? getModuleSource(moduleMatches[0].id) : null;
+    const targetModule = moduleMatches[0] ? u.getModuleSource(moduleMatches[0].id) : null;
     const targetModuleId = moduleMatches[0]?.id ?? null;
 
     let regex: RegExp;
     try {
-        regex = buildRegex(matchPattern);
+        regex = u.buildPatchRegex(matchPattern);
     } catch {
+        u.mcpLogger.warn(`testPatch: invalid match regex "${matchPattern.slice(0, 100)}"`);
         return { error: true, message: `Invalid match regex: ${matchPattern}` };
     }
 
@@ -328,25 +319,28 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
     let diagnostic: MatchDiagnostic | null = null;
 
     if (targetModule) {
-        const match = targetModule.match(regex);
-        matchWorks = !!match;
-        matchedText = match?.[0]?.slice(0, CONTEXT.MATCHED_TEXT_MAX) ?? null;
-        captureGroups = match ? match.length - 1 : 0;
-        matchIndex = match?.index ?? null;
+        const firstHit = regex.global
+            ? (() => { const r = new RegExp(regex.source, regex.flags.replace("g", "")); return targetModule.match(r); })()
+            : targetModule.match(regex);
+        matchWorks = !!firstHit;
+        matchedText = firstHit?.[0]?.slice(0, CONTEXT.MATCHED_TEXT_MAX) ?? null;
+        captureGroups = firstHit ? firstHit.length - 1 : 0;
+        matchIndex = firstHit?.index ?? null;
 
         if (matchWorks && matchIndex !== null) {
             const ctxStart = Math.max(0, matchIndex - CONTEXT.MATCH_CONTEXT_PAD);
-            const ctxEnd = Math.min(targetModule.length, matchIndex + match![0].length + CONTEXT.MATCH_CONTEXT_PAD);
+            const ctxEnd = Math.min(targetModule.length, matchIndex + firstHit![0].length + CONTEXT.MATCH_CONTEXT_PAD);
             matchContext = targetModule.slice(ctxStart, ctxEnd);
         }
 
         if (matchWorks && replaceStr != null) {
-            replaceWarnings = validateReplace(replaceStr, captureGroups);
+            replaceWarnings = validateReplace(replaceStr, captureGroups, regex.source);
             if (matchIndex !== null) {
                 const replaced = targetModule.replace(regex, replaceStr);
                 const start = Math.max(0, matchIndex - CONTEXT.REPLACEMENT_BEFORE);
                 const end = Math.min(replaced.length, matchIndex + (replaceStr.length || 50) + CONTEXT.REPLACEMENT_AFTER);
                 replacementPreview = replaced.slice(start, end);
+                replaceWarnings.push(...checkSyntaxAfterReplace(targetModule, regex, replaceStr));
             }
         }
 
@@ -367,8 +361,8 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
     else verdict = "PASS";
 
     let findContext: string | undefined;
-    if (findUnique && targetModule) {
-        const canonFind = findStr as string;
+    if (targetModule) {
+        const canonFind = findStr;
         const idx = findRegex ? targetModule.search(findRegex) : targetModule.indexOf(canonFind);
         if (idx !== -1) {
             const start = Math.max(0, idx - CONTEXT.FIND_CONTEXT_BEFORE);
@@ -380,7 +374,7 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
     let nearbyAnchors: AnchorInfo[] | undefined;
     let suggestedFinds: string[] | undefined;
     if (targetModule) {
-        const canonFind = findStr as string;
+        const canonFind = findStr;
         const findIdx = findRegex ? targetModule.search(findRegex) : targetModule.indexOf(canonFind);
         if (findIdx !== -1) {
             nearbyAnchors = discoverAnchors(targetModule, findIdx, CONTEXT.ANCHOR_RADIUS);
@@ -400,7 +394,7 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
                             const aSearch = a.anchor.startsWith("#{intl::") ? canonicalizeMatch(a.anchor) : a.anchor.replace(/^"|"$/g, "");
                             const bSearch = b.anchor.startsWith("#{intl::") ? canonicalizeMatch(b.anchor) : b.anchor.replace(/^"|"$/g, "");
                             const combined = aSearch + "," + bSearch;
-                            if (countModuleMatchesFast(combined, 3) === 1) {
+                            if (u.countModuleMatchesFast(combined, 3) === 1) {
                                 combos.push(`${a.anchor} + ${b.anchor}`);
                                 break;
                             }
@@ -412,37 +406,30 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
         }
     }
 
+    let multiMatchResults: Array<{ id: string; matchWorks: boolean; matchedText?: string }> | undefined;
+    if (!findUnique && moduleMatches.length > 1) {
+        multiMatchResults = moduleMatches.slice(0, 5).map(m => {
+            const src = u.getModuleSource(m.id);
+            const result = src.match(regex);
+            return { id: m.id, matchWorks: !!result, matchedText: result?.[0]?.slice(0, 80) };
+        });
+    }
+
     let benchmarkResult: Record<string, unknown> | undefined;
     if (args.benchmark && matchWorks && targetModule && replaceStr != null) {
-        const iters = Math.min(Math.max(args.iterations ?? 10000, 100), 100000);
-        const numRounds = Math.min(Math.max(args.rounds ?? 3, 1), 10);
-
-        const coldStart = performance.now();
-        targetModule.replace(regex, replaceStr);
-        const coldMs = performance.now() - coldStart;
-
-        for (let i = 0; i < Math.min(iters, 500); i++) targetModule.replace(regex, replaceStr);
-
-        const roundResults: number[] = [];
-        for (let r = 0; r < numRounds; r++) {
-            const start = performance.now();
-            for (let i = 0; i < iters; i++) targetModule.replace(regex, replaceStr);
-            roundResults.push(performance.now() - start);
-        }
-
-        const perOp = roundResults.map(t => t / iters);
-        const median = [...perOp].sort((a, b) => a - b)[Math.floor(perOp.length / 2)];
-        const min = Math.min(...perOp);
+        const iters = u.clampIters(args.iterations, 10000);
+        const numRounds = u.clampRounds(args.rounds, 3);
+        const bench = u.benchmarkReplace(targetModule, regex, replaceStr, iters, numRounds);
 
         benchmarkResult = {
-            coldShotMs: +coldMs.toFixed(3),
-            wouldFlagSlow: coldMs > 5,
+            coldShotMs: bench.coldMs,
+            wouldFlagSlow: bench.wouldFlagSlow,
             iterations: iters,
             rounds: numRounds,
             moduleSize: targetModule.length,
-            medianPerOp: +(median * 1000).toFixed(2) + "μs",
-            minPerOp: +(min * 1000).toFixed(2) + "μs",
-            roundsPerOp: perOp.map(t => +(t * 1000).toFixed(2) + "μs"),
+            medianPerOp: bench.medianUs + "μs",
+            minPerOp: bench.minUs + "μs",
+            roundsPerOp: bench.roundsUs.map(v => v + "μs"),
         };
     }
 
@@ -468,6 +455,7 @@ export async function handleTestPatchTool(args: TestPatchToolArgs): Promise<unkn
         findContext,
         nearbyAnchors: nearbyAnchors?.length ? nearbyAnchors : undefined,
         suggestedFinds: suggestedFinds?.length ? suggestedFinds : undefined,
+        multiMatchResults: multiMatchResults?.length ? multiMatchResults : undefined,
         benchmark: benchmarkResult,
     };
 }
