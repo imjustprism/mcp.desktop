@@ -1,24 +1,16 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 import { getIntlMessageFromHash } from "@utils/discord";
-import { isNonNullish } from "@utils/guards";
 import { runtimeHashMessageKey } from "@utils/intlHash";
 import { Logger } from "@utils/Logger";
 import { isObject, removeFromArray, tryOrElse } from "@utils/misc";
 import { canonicalizeMatch } from "@utils/patches";
+import { escapeRegExp } from "@utils/text";
 import * as WebpackPatcher from "@webpack/patcher";
 
 import keyMapJson from "../map/key_map.json";
-import { getToolTimeout } from "../timeouts";
 import {
     ActiveTrace,
     AnchorCandidate,
     BatchResult,
-    ComponentIndex,
     ComponentInfo,
     CSSClassEntry,
     CSSIndexCache,
@@ -30,21 +22,19 @@ import {
     PluginPatch,
     PluginReplacement,
     ReactFiber,
-    StoryControl,
-    StoryEntry,
+    ToolError,
     WebpackModule,
 } from "../types";
-import { factoryListeners, findAll, findStore, Flux, getFluxDispatcherInternal, getIconsModuleId, getUIBarrelModuleId, i18n, IconsModule, plugins, UIBarrelModule, wreq } from "../webpack";
-import { CACHE_TTL, createIntlKeyPatternRegex, CSS_CLASS_RE, INTL_DETECTION, LIMITS, MANA_COMPONENT_RE, REGEX_CACHE_MAX_SIZE } from "./constants";
+import { factoryListeners, findStore, Flux, getFluxDispatcherInternal, i18n, plugins, wreq } from "../webpack";
+import { CACHE_TTL, createIntlHashBracketRegex, createIntlHashDotRegex, createIntlKeyPatternRegex, CSS_CLASS_RE, HOOK_EFFECT_FLAGS, INTL_DETECTION, LIMITS, REGEX_CACHE_MAX_SIZE, SANITIZE } from "./constants";
 
 export const mcpLogger = new Logger("mcp", "#d97756");
 
-const KEY_MAP: Record<string, string> = { ...keyMapJson };
 const { getFactoryPatchedSource, getFactoryPatchedBy } = WebpackPatcher;
 
 const regexCache = new Map<string, RegExp>();
 
-export function getCachedRegex(pattern: string, flags = ""): RegExp {
+function getCachedRegex(pattern: string, flags = ""): RegExp {
     const key = `${pattern}\0${flags}`;
     let regex = regexCache.get(key);
     if (!regex) {
@@ -71,6 +61,22 @@ export function invalidateModuleIdCache(): void {
     moduleIdCache = null;
 }
 
+export const moduleAt = (id: PropertyKey): WebpackModule | undefined => wreq.c[id] as WebpackModule | undefined;
+export const moduleEntries = (): [string, WebpackModule][] => Object.entries(wreq.c) as [string, WebpackModule][];
+
+export function classifyExportType(val: unknown): string {
+    if (typeof val !== "function") return typeof val;
+    return (val as { prototype?: { render?: unknown } }).prototype?.render ? "Component" : "Function";
+}
+
+export function* eachPatch(): Generator<{ name: string; patch: PluginPatch; index: number }> {
+    for (const [name, plugin] of Object.entries(plugins)) {
+        if (!plugin.patches?.length) continue;
+        let index = 0;
+        for (const patch of plugin.patches) yield { name, patch, index: index++ };
+    }
+}
+
 const batchResultsCache = new Map<string, BatchResult>();
 let batchCacheTime = 0;
 
@@ -79,13 +85,13 @@ export function clearBatchResultsCache(): void {
 }
 
 const moduleSourceCache = new Map<string, string>();
-let cacheTimestamp = 0;
+let moduleSourceCacheTime = 0;
 
 export function getModuleSource(id: string): string {
     const now = Date.now();
-    if (now - cacheTimestamp > CACHE_TTL.MODULE_SOURCE_MS) {
+    if (now - moduleSourceCacheTime > CACHE_TTL.MODULE_SOURCE_MS) {
         moduleSourceCache.clear();
-        cacheTimestamp = now;
+        moduleSourceCacheTime = now;
     }
 
     let source = moduleSourceCache.get(id);
@@ -93,8 +99,7 @@ export function getModuleSource(id: string): string {
         const factory = wreq.m[id];
         if (!factory) return "";
         const code = String(factory);
-        const isArrow = code.startsWith("(");
-        source = "0," + (isArrow ? "" : "function") + code.slice(code.indexOf("("));
+        source = "0," + (code.startsWith("(") ? "" : "function") + code.slice(code.indexOf("("));
         moduleSourceCache.set(id, source);
     }
     return source;
@@ -104,7 +109,103 @@ export function clearModuleSourceCache(): void {
     moduleSourceCache.clear();
 }
 
-export function countModuleMatchesFast(str: string, earlyExit = 10): number {
+const MODULE_HEADER_RE = /^0,(?:function)?\(\w+,\w+,(\w+)\)/;
+const requireParam = (src: string) => MODULE_HEADER_RE.exec(src.slice(0, 40))?.[1];
+let depGraphCache: { forward: Map<string, string[]>; reverse: Map<string, string[]> } | null = null;
+let depGraphCount = -1;
+
+export function buildDependencyGraph(): { forward: Map<string, string[]>; reverse: Map<string, string[]> } {
+    const ids = getModuleIds();
+    if (depGraphCache && ids.length === depGraphCount) return depGraphCache;
+    const forward = new Map<string, string[]>();
+    const reverse = new Map<string, string[]>();
+    for (const id of ids) {
+        const src = getModuleSource(id);
+        const p = requireParam(src);
+        if (!p) continue;
+        const callRe = getCachedRegex("(?<![\\w$.])" + p + "(?:\\.n)?\\((\\d+)\\)", "g");
+        const bindRe = getCachedRegex(p + "\\.bind\\(" + p + ",(\\d+)\\)", "g");
+        const deps = new Set<string>();
+        let m: RegExpExecArray | null;
+        while ((m = callRe.exec(src))) if (m[1] !== id) deps.add(m[1]);
+        while ((m = bindRe.exec(src))) if (m[1] !== id) deps.add(m[1]);
+        if (!deps.size) continue;
+        const arr = [...deps];
+        forward.set(id, arr);
+        for (const d of arr) reverse.get(d)?.push(id) ?? reverse.set(d, [id]);
+    }
+    depGraphCache = { forward, reverse };
+    depGraphCount = ids.length;
+    return depGraphCache;
+}
+
+export function clearDependencyGraphCache(): void {
+    depGraphCache = null;
+    depGraphCount = -1;
+}
+
+let identityIndex: WeakMap<object, { id: string; key: string }> | null = null;
+let identityIndexCount = -1;
+
+export const innerType = (val: { type?: unknown; render?: unknown }): unknown => val.type ?? val.render;
+
+function buildExportIdentityIndex(): WeakMap<object, { id: string; key: string }> {
+    const loaded = Object.keys(wreq.c);
+    if (identityIndex && loaded.length === identityIndexCount) return identityIndex;
+    const index = new WeakMap<object, { id: string; key: string }>();
+    for (const id of loaded) {
+        const exports = wreq.c[id]?.exports;
+        if (!exports || (typeof exports !== "object" && typeof exports !== "function")) continue;
+        index.set(exports as object, { id, key: "module" });
+        let keys: string[];
+        try { keys = Object.keys(exports); } catch { continue; }
+        for (const key of keys) {
+            let val: unknown;
+            try { val = (exports as Record<string, unknown>)[key]; } catch { continue; }
+            if (!val || (typeof val !== "object" && typeof val !== "function")) continue;
+            if (!index.has(val as object)) index.set(val as object, { id, key });
+            let inner: unknown;
+            try { inner = innerType(val as { type?: unknown; render?: unknown }); } catch { continue; }
+            if (inner && (typeof inner === "object" || typeof inner === "function") && !index.has(inner as object)) index.set(inner as object, { id, key });
+        }
+    }
+    identityIndex = index;
+    identityIndexCount = loaded.length;
+    return index;
+}
+
+export function invalidateIdentityIndex(): void {
+    identityIndex = null;
+    identityIndexCount = -1;
+}
+
+export function lookupIdentity(value: unknown): { id: string; key: string } | null {
+    if (!value || (typeof value !== "object" && typeof value !== "function")) return null;
+    return buildExportIdentityIndex().get(value as object) ?? null;
+}
+
+export function parsePublicExports(id: string): Record<string, string> {
+    const src = getModuleSource(id);
+    const p = requireParam(src);
+    if (!p) return {};
+    const publicExports: Record<string, string> = {};
+    const dRe = new RegExp("(?<![\\w$.])" + p + "\\.d\\(\\w+,\\{", "g");
+    let dm: RegExpExecArray | null;
+    while ((dm = dRe.exec(src))) {
+        const braceStart = src.indexOf("{", dm.index);
+        let depth = 0;
+        let end = -1;
+        for (let i = braceStart; i < src.length; i++) {
+            if (src[i] === "{") depth++;
+            else if (src[i] === "}" && --depth === 0) { end = i; break; }
+        }
+        if (end < 0) continue;
+        for (const mm of src.slice(braceStart + 1, end).matchAll(/(\w+):\(\)=>\(?(?:0,)?([\w$]+(?:\.[\w$]+)*)\)?/g)) if (!Object.hasOwn(publicExports, mm[1])) publicExports[mm[1]] = mm[2];
+    }
+    return publicExports;
+}
+
+export function countModuleMatches(str: string, earlyExit = 10): number {
     if (!str || str.length < 3) return 0;
 
     const cached = batchResultsCache.get(str);
@@ -190,17 +291,6 @@ export function clearIntlCache(): void {
     intlHashToKeyMap = null;
 }
 
-export function addToKeyMap(entries: Record<string, string>): number {
-    let added = 0;
-    for (const [hash, key] of Object.entries(entries)) {
-        if (!(hash in KEY_MAP)) {
-            (KEY_MAP as Record<string, string>)[hash] = key;
-            added++;
-        }
-    }
-    if (added) intlHashToKeyMap = null;
-    return added;
-}
 let localeMessagesCache: Record<string, unknown[]> | null = null;
 let localeMessagesCacheTime = 0;
 
@@ -221,39 +311,12 @@ export function getLocaleMessages(): Record<string, unknown[]> | null {
     return null;
 }
 
-let orderedIntlHashesCache: string[] | null = null;
-
-export function getOrderedIntlHashes(): string[] | null {
-    if (orderedIntlHashesCache) return orderedIntlHashesCache;
-
-    for (const [id, factory] of Object.entries(wreq.m) as [string, { toString(): string }][]) {
-        const src = factory.toString();
-        if (src.length < INTL_DETECTION.ORDERED_MODULE_MIN_SRC_LEN || !src.includes(INTL_DETECTION.ORDERED_MODULE_SENTINEL_HASH)) continue;
-
-        const pattern = /"([A-Za-z0-9+/]{6})":/g;
-        const hashes: string[] = [];
-        const seen = new Set<string>();
-        let m: RegExpExecArray | null;
-        while ((m = pattern.exec(src))) {
-            if (!seen.has(m[1])) {
-                seen.add(m[1]);
-                hashes.push(m[1]);
-            }
-        }
-        if (hashes.length > INTL_DETECTION.MIN_LOCALE_KEY_COUNT) {
-            orderedIntlHashesCache = hashes;
-            return hashes;
-        }
-    }
-    return null;
-}
-
 export function extractIntlText(arr: unknown): string {
     if (!Array.isArray(arr)) return String(arr ?? "");
     return arr.filter(item => typeof item === "string").join("");
 }
 
-export function intlHashExistsInDefinitions(hash: string): boolean {
+function intlHashExistsInDefinitions(hash: string): boolean {
     if (getLocaleMessages()?.[hash]) return true;
     try {
         const msg = i18n.intl.string(i18n.t[hash]);
@@ -265,42 +328,36 @@ export function intlHashExistsInDefinitions(hash: string): boolean {
 
 export function buildIntlHashToKeyMap(): Map<string, string> {
     if (intlHashToKeyMap) return intlHashToKeyMap;
-    intlHashToKeyMap = new Map();
+    const map = (intlHashToKeyMap = new Map<string, string>(Object.entries(keyMapJson)));
 
-    for (const [hash, key] of Object.entries(KEY_MAP)) intlHashToKeyMap.set(hash, key);
-
-    const keyPattern = createIntlKeyPatternRegex(true);
+    const keyPattern = createIntlKeyPatternRegex();
     const extract = (str: string) => {
         let m: RegExpExecArray | null;
         while ((m = keyPattern.exec(str))) {
-            intlHashToKeyMap!.set(runtimeHashMessageKey(m[1]), m[1]);
+            map.set(runtimeHashMessageKey(m[1]), m[1]);
         }
     };
 
     for (const id of getModuleIds()) extract(getModuleSource(id));
 
-    for (const plugin of Object.values(plugins)) {
-        if (!plugin.patches) continue;
-        for (const patch of plugin.patches as PluginPatch[]) {
-            if (typeof patch.find === "string") extract(patch.find);
-            else if (patch.find instanceof RegExp) extract(patch.find.source);
-            const reps = Array.isArray(patch.replacement) ? patch.replacement : [patch.replacement];
-            for (const r of reps as PluginReplacement[]) {
-                if (r?.match instanceof RegExp) extract(r.match.source);
-                else if (typeof r?.match === "string") extract(r.match);
-                if (typeof r?.replace === "string") extract(r.replace);
-            }
+    for (const { patch } of eachPatch()) {
+        if (typeof patch.find === "string") extract(patch.find);
+        else if (patch.find instanceof RegExp) extract(patch.find.source);
+        for (const r of getReplacements(patch)) {
+            if (r?.match instanceof RegExp) extract(r.match.source);
+            else if (typeof r?.match === "string") extract(r.match);
+            if (typeof r?.replace === "string") extract(r.replace);
         }
     }
 
-    return intlHashToKeyMap;
+    return map;
 }
 
 export function getIntlKeyFromHash(hash: string): string | null {
     return buildIntlHashToKeyMap().get(hash) ?? null;
 }
 
-export function searchModulesOptimized(predicate: (source: string, id: string) => boolean, limit: number): string[] {
+export function findModuleIds(predicate: (source: string, id: string) => boolean, limit: number): string[] {
     const results: string[] = [];
     const ids = getModuleIds();
     for (let i = 0; i < ids.length && results.length < limit; i++) {
@@ -310,11 +367,11 @@ export function searchModulesOptimized(predicate: (source: string, id: string) =
     return results;
 }
 
-export function serializeResult(value: unknown, maxLength = 50000): string {
+function sanitizeValue(value: unknown, strCap: number): unknown {
     const seen = new WeakSet();
     let depth = 0;
 
-    const sanitize = (val: unknown): unknown => {
+    const rec = (val: unknown): unknown => {
         if (val == null) return null;
         switch (typeof val) {
             case "bigint":
@@ -323,40 +380,53 @@ export function serializeResult(value: unknown, maxLength = 50000): string {
                 return val.toString();
             case "function": {
                 const str = val.toString();
-                return str.length > 500 ? str.slice(0, 500) + "..." : str;
+                return str.length > SANITIZE.TOSTRING_MAX ? str.slice(0, SANITIZE.TOSTRING_MAX) + "..." : str;
             }
             case "object": {
                 if (seen.has(val)) return "[Circular]";
+                if (depth > SANITIZE.MAX_DEPTH) return "[Max Depth]";
                 seen.add(val);
-                if (depth > 10) return "[Max Depth]";
                 depth++;
                 try {
                     if (val instanceof RegExp) return val.toString();
-                    if (val instanceof Error) return { error: val.message, stack: val.stack?.slice(0, 500) };
-                    if (val instanceof Map) return sanitize(Object.fromEntries(val));
-                    if (val instanceof Set) return sanitize([...val].slice(0, 50));
-                    if (Array.isArray(val)) return val.slice(0, 100).map(sanitize);
+                    if (val instanceof Error) return { error: val.message, stack: val.stack?.slice(0, SANITIZE.TOSTRING_MAX) };
+                    if (val instanceof Map) return rec(Object.fromEntries(val));
+                    if (val instanceof Set) return rec([...val].slice(0, SANITIZE.SET_MAX));
+                    if (Array.isArray(val)) return val.slice(0, SANITIZE.ARRAY_MAX).map(rec);
                     const obj: Record<string, unknown> = {};
-                    const keys = Object.keys(val).filter(k => (val as Record<string, unknown>)[k] !== undefined);
-                    for (const k of keys.slice(0, 50)) obj[k] = sanitize((val as Record<string, unknown>)[k]);
+                    const o = val as Record<string, unknown>;
+                    const keys = Object.keys(o).filter(k => o[k] !== undefined);
+                    for (const k of keys.slice(0, SANITIZE.KEYS_MAX)) obj[k] = rec(o[k]);
                     return obj;
                 } finally {
+                    seen.delete(val);
                     depth--;
                 }
             }
             case "string":
-                return val.length > 1000 ? val.slice(0, 1000) + "..." : val;
+                return val.length > strCap ? val.slice(0, strCap) + "..." : val;
+            case "number":
+                return Number.isFinite(val) ? val : String(val);
             default:
                 return val;
         }
     };
 
+    return rec(value);
+}
+
+export function serializeResult(value: unknown, maxLength: number = SANITIZE.OUTPUT_MAX_LENGTH): string {
     try {
-        const json = JSON.stringify(sanitize(value));
+        const json = JSON.stringify(sanitizeValue(value, maxLength));
         return json.length > maxLength ? json.slice(0, maxLength) + "\n... [truncated]" : json;
     } catch {
         return String(value);
     }
+}
+
+export function toStructuredContent(value: unknown, maxLength: number = SANITIZE.OUTPUT_MAX_LENGTH): Record<string, unknown> | undefined {
+    const s = sanitizeValue(value, maxLength);
+    return s !== null && typeof s === "object" && !Array.isArray(s) ? (s as Record<string, unknown>) : undefined;
 }
 
 export function extractModule(id: PropertyKey, patched = true): string {
@@ -366,7 +436,7 @@ export function extractModule(id: PropertyKey, patched = true): string {
     }
 
     const source = getModuleSource(String(id));
-    if (!source) throw new Error(`Module not found: ${String(id)}`);
+    if (!source) throw new Error(`Module ${String(id)} not found`);
     return source;
 }
 
@@ -381,20 +451,16 @@ export function getAllStoreNames(): string[] {
         .sort();
 }
 
-export function getAdaptiveTimeout(toolName: string, args?: Record<string, unknown>): number {
-    return getToolTimeout(toolName, args?.action as string | undefined);
-}
-
 export function withTimeout<T>(promise: Promise<T>, ms: number, toolName: string): Promise<T> {
     return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`${toolName} timed out after ${Math.round(ms / 1000)}s. The operation took too long to complete.`)), ms);
+        const timer = setTimeout(() => reject(new Error(`${toolName} timed out after ${Math.round(ms / 1000)}s`)), ms);
         promise.then(resolve, reject).finally(() => clearTimeout(timer));
     });
 }
 
 export function parseRegex(pattern: string): RegExp | null {
-    if (pattern.startsWith("/") && pattern.lastIndexOf("/") > 0) {
-        const lastSlash = pattern.lastIndexOf("/");
+    const lastSlash = pattern.lastIndexOf("/");
+    if (pattern.startsWith("/") && lastSlash > 0) {
         try {
             return getCachedRegex(pattern.slice(1, lastSlash), pattern.slice(lastSlash + 1));
         } catch {
@@ -404,29 +470,54 @@ export function parseRegex(pattern: string): RegExp | null {
     return null;
 }
 
+interface SourceMatcher {
+    test(src: string): boolean;
+    firstIndex(src: string): number;
+    matchLen(src: string): number;
+}
+
+export function makePatternMatcher(pattern: string): SourceMatcher {
+    const parsed = parseRegex(pattern);
+    const regex = parsed ? stripGlobal(canonicalizeMatch(parsed)) : null;
+
+    if (regex) {
+        return {
+            test: src => regex.test(src),
+            firstIndex: src => src.search(regex),
+            matchLen: src => src.match(regex)?.[0].length ?? 0,
+        };
+    }
+
+    const canon = canonicalizeMatch(pattern);
+    return {
+        test: src => src.includes(canon),
+        firstIndex: src => src.indexOf(canon),
+        matchLen: () => canon.length,
+    };
+}
+
+export function snippet(source: string, idx: number, matchLen: number, before = 60, after = 120): string {
+    if (idx < 0) return source.slice(0, 200);
+    return source.slice(Math.max(0, idx - before), Math.min(source.length, idx + matchLen + after));
+}
+
 export function cleanupIntercept(id: number): boolean {
     const intercept = interceptState.active.get(id);
     if (!intercept) return false;
+    invalidateIdentityIndex();
 
-    if (intercept.methodKey && intercept.methodParent) {
-        try {
-            intercept.methodParent[intercept.methodKey] = intercept.original;
-        } catch {
-            /* ew */
+    const { methodKey, methodParent, exportKey, original } = intercept;
+    try {
+        if (methodKey && methodParent) {
+            methodParent[methodKey] = original;
+        } else {
+            const mod = moduleAt(intercept.moduleId);
+            const target = exportKey === "module" ? mod : mod?.exports;
+            const prop = exportKey === "module" ? "exports" : exportKey;
+            if (target) Object.defineProperty(target, prop, { value: original, configurable: true, writable: true });
         }
-    } else {
-        const mod = wreq.c[intercept.moduleId] as WebpackModule | undefined;
-        if (mod) {
-            try {
-                if (intercept.exportKey === "module") {
-                    Object.defineProperty(mod, "exports", { value: intercept.original, configurable: true, writable: true });
-                } else if (mod.exports) {
-                    Object.defineProperty(mod.exports, intercept.exportKey, { value: intercept.original, configurable: true, writable: true });
-                }
-            } catch {
-                /* ew */
-            }
-        }
+    } catch {
+
     }
     interceptState.active.delete(id);
     return true;
@@ -473,43 +564,13 @@ export function cleanupModuleWatch(id: number): boolean {
 export const cleanupExpiredModuleWatches = () => expireAll(moduleWatchState.active, cleanupModuleWatch);
 export const cleanupAllModuleWatches = () => cleanAll(moduleWatchState.active, cleanupModuleWatch);
 
-const FIBER_TAGS: Readonly<Record<number, string>> = {
-    0: "Function",
-    1: "Class",
-    2: "Indeterminate",
-    3: "HostRoot",
-    4: "Portal",
-    5: "DOM",
-    6: "Text",
-    7: "Fragment",
-    8: "Mode",
-    9: "ContextConsumer",
-    10: "ContextProvider",
-    11: "ForwardRef",
-    12: "Profiler",
-    13: "Suspense",
-    14: "Memo",
-    15: "SimpleMemo",
-    16: "Lazy",
-    17: "IncompleteClass",
-    18: "DehydratedFragment",
-    19: "SuspenseList",
-    20: "Scope",
-    21: "Offscreen",
-    22: "LegacyHidden",
-    23: "Cache",
-    24: "TracingMarker",
-    25: "HostHoistable",
-    26: "HostSingleton",
-    27: "HostResource",
-};
+const FIBER_TAGS: readonly string[] = ["Function", "Class", "Indeterminate", "HostRoot", "Portal", "DOM", "Text", "Fragment", "Mode", "ContextConsumer", "ContextProvider", "ForwardRef", "Profiler", "Suspense", "Memo", "SimpleMemo", "Lazy", "IncompleteClass", "DehydratedFragment", "SuspenseList", "Scope", "Offscreen", "LegacyHidden", "Cache", "TracingMarker", "HostHoistable", "HostSingleton", "HostResource"];
 
-export function getFiber(el: Element): ReactFiber | null {
-    for (const key in el) {
-        if (key.startsWith("__reactFiber$")) return (el as any)[key] as ReactFiber;
-    }
+export function fiberFromKey(obj: object, prefix: string): ReactFiber | null {
+    for (const key in obj) if (key.startsWith(prefix)) return (obj as Record<string, ReactFiber>)[key];
     return null;
 }
+export const getFiber = (el: Element): ReactFiber | null => fiberFromKey(el, "__reactFiber$");
 
 export function getComponentName(fiber: ReactFiber | null): string | null {
     const type = fiber?.type;
@@ -526,13 +587,18 @@ export function getComponentInfo(fiber: ReactFiber | null): ComponentInfo {
     const key = fiber?.key ?? null;
 
     if (!type) return { name: null, tagType, isMinified: false, key };
-    if (type.displayName) return { name: type.displayName, tagType, isMinified: false, key };
-    if (typeof type === "string") return { name: type as string, tagType, isMinified: false, key };
-    if (typeof type.name === "string" && type.name.length > 2) return { name: type.name, tagType, isMinified: false, key };
-    if (type.render?.displayName) return { name: type.render.displayName, tagType, isMinified: false, key };
-    if (type.WrappedComponent?.displayName) return { name: `Wrapped(${type.WrappedComponent.displayName})`, tagType, isMinified: false, key };
-
-    return { name: null, tagType, isMinified: typeof type.name === "string" && type.name.length <= 2, key };
+    const name = type.displayName
+        ? type.displayName
+        : typeof type === "string"
+          ? type
+          : typeof type.name === "string" && type.name.length > 2
+            ? type.name
+            : type.render?.displayName
+              ? type.render.displayName
+              : type.WrappedComponent?.displayName
+                ? `Wrapped(${type.WrappedComponent.displayName})`
+                : null;
+    return { name, tagType, isMinified: !name && typeof type.name === "string" && type.name.length <= 2, key };
 }
 
 export function serializeValue(val: unknown, d = 0): unknown {
@@ -550,11 +616,7 @@ export function serializeValue(val: unknown, d = 0): unknown {
 
     const keys = Object.keys(obj);
     if (!keys.length) return "{}";
-    if (d < 2 && keys.length <= 4) {
-        const result: Record<string, unknown> = {};
-        for (const k of keys) result[k] = serializeValue(obj[k], d + 1);
-        return result;
-    }
+    if (d < 2 && keys.length <= 4) return Object.fromEntries(keys.map(k => [k, serializeValue(obj[k], d + 1)]));
     return `{${keys.slice(0, 4).join(",")}}`;
 }
 
@@ -568,9 +630,9 @@ export function getHookType(hook: FiberMemoizedState): string {
         const mso = ms as Record<string, unknown>;
         if ("tag" in mso && "create" in mso) {
             const tag = mso.tag as number;
-            if (tag & 4) return "useLayoutEffect";
-            if (tag & 2) return "useInsertionEffect";
-            if (tag & 8) return "useEffect";
+            if (tag & HOOK_EFFECT_FLAGS.LAYOUT) return "useLayoutEffect";
+            if (tag & HOOK_EFFECT_FLAGS.INSERTION) return "useInsertionEffect";
+            if (tag & HOOK_EFFECT_FLAGS.PASSIVE) return "useEffect";
             return "effect";
         }
         if ("current" in mso) return "useRef";
@@ -588,23 +650,19 @@ export function isRenderedClassName(input: string): boolean {
     return CSS_CLASS_RE.test(input);
 }
 
+const isCssClassValue = (v: unknown): v is string => typeof v === "string" && CSS_CLASS_RE.test(v);
+
 function isCSSModule(exports: unknown): boolean {
     if (!exports || typeof exports !== "object") return false;
     const keys = Object.keys(exports);
-    return (
-        keys.length >= 3 &&
-        keys.every(k => {
-            const v = (exports as Record<string, unknown>)[k];
-            return typeof v === "string" && CSS_CLASS_RE.test(v);
-        })
-    );
+    return keys.length >= 3 && keys.every(k => isCssClassValue((exports as Record<string, unknown>)[k]));
 }
 
 function buildCSSIndex(): CSSIndexCache {
     const index = new Map<string, CSSClassEntry>();
     const modules = new Map<string, CSSModuleInfo>();
 
-    for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
+    for (const [id, mod] of moduleEntries()) {
         if (!mod?.exports || !isCSSModule(mod.exports)) continue;
         const exp = mod.exports as Record<string, string>;
         const keys = Object.keys(exp);
@@ -639,20 +697,10 @@ export function clearCSSIndexCache(): void {
 
 export function getCSSModuleStats() {
     const { modules } = getCSSIndex();
-    let totalClasses = 0;
-    const sorted: Array<{ moduleId: string; classCount: number; hash: string; sampleClasses: string[] }> = [];
-
-    for (const [id, info] of modules) {
-        totalClasses += info.classCount;
-        sorted.push({
-            moduleId: id,
-            classCount: info.classCount,
-            hash: info.hash,
-            sampleClasses: Object.values(info.classes).slice(0, LIMITS.CSS.SAMPLE_CLASSES),
-        });
-    }
-
-    sorted.sort((a, b) => b.classCount - a.classCount);
+    const sorted = [...modules]
+        .map(([moduleId, info]) => ({ moduleId, classCount: info.classCount, hash: info.hash, sampleClasses: Object.values(info.classes).slice(0, LIMITS.CSS.SAMPLE_CLASSES) }))
+        .sort((a, b) => b.classCount - a.classCount);
+    const totalClasses = sorted.reduce((n, m) => n + m.classCount, 0);
 
     return {
         totalModules: modules.size,
@@ -661,161 +709,34 @@ export function getCSSModuleStats() {
     };
 }
 
-let componentCache: ComponentIndex | null = null;
-
-function buildComponentIndex(): ComponentIndex {
-    const stories: StoryEntry[] = [];
-    const manaTypes = new Map<string, string[]>();
-    const displayNames = new Map<string, Array<{ moduleId: string; key: string }>>();
-
-    const addToMap = <V>(map: Map<string, V[]>, key: string, val: V) => {
-        const arr = map.get(key);
-        if (arr) arr.push(val);
-        else map.set(key, [val]);
-    };
-
-    const getDisplayName = (val: unknown): string | undefined => {
-        if (typeof val === "function") return (val as any).displayName;
-        if (val && typeof val === "object") {
-            const obj = val as Record<string, unknown>;
-            return (obj.displayName ?? (obj.render as { displayName?: string } | undefined)?.displayName) as string | undefined;
-        }
-        return undefined;
-    };
-
-    for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
-        if (!mod?.exports) continue;
-        const exp = mod.exports;
-
-        const scanExport = (val: unknown, key: string) => {
-            const dn = getDisplayName(val);
-            if (dn) addToMap(displayNames, dn, { moduleId: id, key });
-
-            if (val && typeof val === "object") {
-                const obj = val as Record<string, unknown>;
-                if (Array.isArray(obj.stories) && obj.title) {
-                    for (const story of obj.stories as Array<Record<string, unknown>>) {
-                        const controls: Record<string, StoryControl> = {};
-                        if (story.controls && typeof story.controls === "object") {
-                            for (const [ck, cv] of Object.entries(story.controls as Record<string, Record<string, unknown>>)) {
-                                controls[ck] = {
-                                    type: cv.type as string,
-                                    label: cv.label as string | undefined,
-                                    defaultValue: cv.defaultValue,
-                                    options: Array.isArray(cv.options)
-                                        ? cv.options.slice(0, LIMITS.COMPONENT.MAX_OPTIONS).map(o => (o && typeof o === "object" && "value" in (o as object) ? (o as { value: unknown }).value : o))
-                                        : undefined,
-                                };
-                            }
-                        }
-                        stories.push({ moduleId: id, title: obj.title as string, name: story.name as string, id: story.id as string, docs: story.docs as string | undefined, controls });
-                    }
-                }
-            }
-        };
-
-        scanExport(exp, "module");
-        if (typeof exp === "object") {
-            for (const [k, v] of Object.entries(exp)) scanExport(v, k);
-        }
-    }
-
-    for (const id of Object.keys(wreq.m)) {
-        const factory = wreq.m[id];
-        if (!factory) continue;
-        const src = Function.prototype.toString.call(factory);
-        for (const m of src.matchAll(MANA_COMPONENT_RE)) {
-            addToMap(manaTypes, m[1], id);
-        }
-    }
-
-    let components = 0,
-        enums = 0;
-    const uiBarrelId = getUIBarrelModuleId();
-    if (UIBarrelModule) {
-        for (const val of Object.values(UIBarrelModule)) {
-            if (typeof val === "function") components++;
-            else if (val && typeof val === "object") {
-                const obj = val as Record<string, unknown>;
-                if (obj.$$typeof) components++;
-                else {
-                    const vals = Object.values(obj);
-                    if (vals.length > 0 && vals.length < 30 && vals.every(v => typeof v === "string" || typeof v === "number")) enums++;
-                }
-            }
-        }
-    }
-
-    const iconCount = IconsModule ? Object.keys(IconsModule).filter(k => typeof IconsModule[k] === "function" && k.endsWith("Icon")).length : 0;
-    const iconsModuleId = getIconsModuleId();
-
-    return { stories, manaTypes, displayNames, uiBarrelId, iconsModuleId, uiBarrelStats: { components, icons: iconCount, enums }, builtAt: Date.now() };
-}
-
-export function getComponentIndex(): ComponentIndex {
-    if (componentCache && Date.now() - componentCache.builtAt < CACHE_TTL.COMPONENT_INDEX_MS) return componentCache;
-    componentCache = buildComponentIndex();
-    return componentCache;
-}
-
-export function clearComponentIndexCache(): void {
-    componentCache = null;
-}
-
-export function extractPropsFromFunction(fn: Function): Array<{ name: string; default?: string }> {
-    const src = fn.toString().slice(0, LIMITS.COMPONENT.PROP_SRC_SLICE);
-    const match = src.match(/let\{([^}]+)\}=e/);
-    if (!match) return [];
-
-    const props: Array<{ name: string; default?: string }> = [];
-    for (const p of match[1].split(",")) {
-        if (props.length >= LIMITS.COMPONENT.MAX_PROPS) break;
-        const parts = p.trim().split(":");
-        const name = parts[0].replace(/^["']|["']$/g, "").trim();
-        if (!name || name.startsWith("...")) continue;
-        const rest = parts.slice(1).join(":").trim();
-        const defMatch = rest.match(/=(.+)/);
-        props.push({ name, default: defMatch ? defMatch[1].trim() : undefined });
-    }
-    return props;
-}
-
 export function scanSingleOccurrences(source: string, regex: RegExp, extract: (m: RegExpExecArray) => { find: string; search: string; type: string } | null, max = 10): AnchorCandidate[] {
-    const counts = new Map<string, number>();
-    const positions = new Map<string, number>();
-    const entries = new Map<string, { find: string; search: string; type: string }>();
+    const seen = new Map<string, { entry: { find: string; search: string; type: string }; index: number; count: number }>();
     let m: RegExpExecArray | null;
 
     while ((m = regex.exec(source))) {
         const entry = extract(m);
         if (!entry) continue;
-        const key = entry.find;
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-        if (!positions.has(key)) {
-            positions.set(key, m.index);
-            entries.set(key, entry);
-        }
+        const e = seen.get(entry.find);
+        if (e) e.count++;
+        else seen.set(entry.find, { entry, index: m.index, count: 1 });
     }
 
     const results: AnchorCandidate[] = [];
-    for (const [key, count] of counts) {
-        if (count !== 1 || results.length >= max) continue;
-        const entry = entries.get(key)!;
-        results.push({ ...entry, index: positions.get(key)! });
-    }
+    for (const { entry, index, count } of seen.values()) if (count === 1 && results.length < max) results.push({ ...entry, index });
     return results;
 }
 
 export function collectMethods(obj: unknown, limit = 20): string[] {
     if (!obj || typeof obj !== "object") return [];
+    const rec = obj as Record<string, unknown>;
     const methods = new Set<string>();
     for (const k of Object.keys(obj)) {
-        if (typeof (obj as Record<string, unknown>)[k] === "function") methods.add(k);
+        if (typeof rec[k] === "function") methods.add(k);
     }
     const proto = Object.getPrototypeOf(obj);
     if (proto && proto !== Object.prototype) {
         for (const k of Object.getOwnPropertyNames(proto)) {
-            if (k !== "constructor" && typeof (obj as Record<string, unknown>)[k] === "function") methods.add(k);
+            if (k !== "constructor" && typeof rec[k] === "function") methods.add(k);
         }
     }
     return [...methods].slice(0, limit);
@@ -840,13 +761,14 @@ interface HintExport {
 }
 
 export function getModuleHint(id: string): string | null {
-    const mod = wreq.c[id] as WebpackModule | undefined;
+    const mod = moduleAt(id);
     if (!mod?.exports) return null;
     const exp = mod.exports as Record<string, HintExport | string | undefined> & HintExport;
-    const dn = exp.default?.displayName ?? exp.displayName ?? exp.default?.name;
+    const dn = safeCall(() => exp.default?.displayName ?? exp.displayName ?? exp.default?.name, undefined);
     if (typeof dn === "string" && dn.length > 1) return dn;
-    const keys = Object.keys(exp);
-    if (keys.length <= 3 && keys.every(k => CSS_CLASS_RE.test(typeof exp[k] === "string" ? (exp[k] as string) : ""))) return "[css]";
+    let keys: string[];
+    try { keys = Object.keys(exp); } catch { return null; }
+    if (keys.length >= 1 && keys.length <= 3 && keys.every(k => isCssClassValue(exp[k]))) return "[css]";
     for (const k of keys) {
         const val = exp[k];
         if (!val || typeof val !== "object") continue;
@@ -883,8 +805,7 @@ export function getModuleHint(id: string): string | null {
 }
 
 export function patchFindAsString(find: string | RegExp | undefined): string {
-    if (typeof find === "string") return find;
-    return find?.toString() ?? "";
+    return typeof find === "string" ? find : find?.toString() ?? "";
 }
 
 export interface CanonFindMatcher {
@@ -911,56 +832,16 @@ export function getReplacements(patch: PluginPatch): PluginReplacement[] {
     return Array.isArray(patch.replacement) ? patch.replacement : [patch.replacement];
 }
 
-const REGEX_META = /[.*+?^${}()|[\]\\]/g;
-function escapeRegex(s: string): string { return s.replace(REGEX_META, "\\$&"); }
-
 export function buildPatchRegex(match: string | RegExp): RegExp {
     if (match instanceof RegExp) return canonicalizeMatch(match);
     const parsed = parseRegex(match);
     if (parsed) return canonicalizeMatch(parsed);
-    return getCachedRegex(escapeRegex(canonicalizeMatch(match)));
-}
-
-export interface BenchmarkResult {
-    coldMs: number;
-    medianUs: number;
-    minUs: number;
-    roundsUs: number[];
-    wouldFlagSlow: boolean;
-}
-
-export function benchmarkReplace(source: string, regex: RegExp, replaceStr: string, iters: number, numRounds: number): BenchmarkResult {
-    const coldStart = performance.now();
-    source.replace(regex, replaceStr);
-    const coldMs = performance.now() - coldStart;
-
-    const warmup = Math.min(iters, 500);
-    for (let i = 0; i < warmup; i++) source.replace(regex, replaceStr);
-
-    const roundTimes: number[] = [];
-    for (let r = 0; r < numRounds; r++) {
-        const start = performance.now();
-        for (let i = 0; i < iters; i++) source.replace(regex, replaceStr);
-        roundTimes.push(performance.now() - start);
-    }
-
-    const perOp = roundTimes.map(t => t / iters);
-    const sorted = [...perOp].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    return {
-        coldMs: +coldMs.toFixed(3),
-        medianUs: +(median * 1000).toFixed(2),
-        minUs: +(Math.min(...perOp) * 1000).toFixed(2),
-        roundsUs: perOp.map(t => +(t * 1000).toFixed(2)),
-        wouldFlagSlow: coldMs > 5,
-    };
+    return getCachedRegex(escapeRegExp(canonicalizeMatch(match)));
 }
 
 export function clamp(v: number | undefined, def: number, lo: number, hi: number): number {
     return Math.min(Math.max(v ?? def, lo), hi);
 }
-export const clampIters = (v: number | undefined, def: number, lo = 100, hi = 100_000) => clamp(v, def, lo, hi);
-export const clampRounds = (v: number | undefined, def: number, lo = 1, hi = 10) => clamp(v, def, lo, hi);
 
 export function countUnescapedCaptures(pattern: string): number {
     let count = 0;
@@ -986,66 +867,91 @@ export function extractCaptureNames(pattern: string): string[] {
     return names;
 }
 
-export interface IntlProbe {
+interface IntlProbe {
     intlKey: string;
     intlStatus: "key_valid_but_unused" | "key_not_found";
 }
 
-let _intlKeyPatternSingle: RegExp | null = null;
-function _intlKeyPattern(): RegExp {
-    return (_intlKeyPatternSingle ??= /#\{intl::([A-Z][A-Z0-9_]*)/);
+const _intlKeyPattern = /#\{intl::([A-Z][A-Z0-9_]*)/;
+
+export function intlFind(hash: string, key: string | null | undefined): string {
+    return key ? `#{intl::${key}}` : `#{intl::${hash}::raw}`;
+}
+
+export const errMsg = (e: unknown): string => e instanceof Error ? e.message : String(e);
+
+export const remainingMs = (expiresAt: number): number => Math.max(0, expiresAt - Date.now());
+
+export function stripGlobal(regex: RegExp): RegExp {
+    return regex.global ? new RegExp(regex.source, regex.flags.replace("g", "")) : regex;
+}
+
+export function ownAndProtoNames(obj: object, proto: object | null): string[] {
+    return [...new Set([...(proto ? Object.getOwnPropertyNames(proto) : []), ...Object.getOwnPropertyNames(obj)])];
+}
+
+export function healthStatus(broken: number, total: number): "HEALTHY" | "DEGRADED" | "BROKEN" {
+    return broken === 0 ? "HEALTHY" : broken < total / 2 ? "DEGRADED" : "BROKEN";
+}
+
+export function checkJsSyntax(code: string): string | null {
+    try { new Function(code); return null; } catch (e) { return errMsg(e); }
+}
+
+export function exportKeysPreview(exports: unknown): string[] | undefined {
+    return typeof exports === "object" && exports ? Object.keys(exports).slice(0, LIMITS.MODULE.EXPORT_KEYS_PREVIEW) : undefined;
+}
+
+export function* iterIntlHashes(source: string): Generator<{ hash: string; key: string | null; index: number }> {
+    for (const regex of [createIntlHashDotRegex(), createIntlHashBracketRegex()]) {
+        let m: RegExpExecArray | null;
+        while ((m = regex.exec(source))) yield { hash: m[1], key: getIntlKeyFromHash(m[1]), index: m.index };
+    }
+}
+
+export function* fibersUp(fiber: ReactFiber | null, maxDepth: number): Generator<{ fiber: ReactFiber; depth: number }> {
+    let current = fiber, depth = 0;
+    while (current && depth < maxDepth) {
+        yield { fiber: current, depth };
+        current = current.return ?? null;
+        depth++;
+    }
+}
+
+export function stopAllResult(map: { size: number }, cleanupAll: () => void): { stopped: number } {
+    const stopped = map.size;
+    cleanupAll();
+    return { stopped };
+}
+
+export function stopOneResult<C>(map: Map<number, { captures: C[] }>, id: number, label: string, cleanup: (id: number) => boolean, summarize: (c: C[]) => Record<string, unknown>) {
+    const s = map.get(id);
+    if (!s) return { error: true as const, message: `${label} ${id} not found` };
+    const { captures } = s;
+    cleanup(id);
+    return { id, stopped: true, captureCount: captures.length, ...summarize(captures) };
+}
+
+export function typeSample(obj: Record<string, unknown>, n: number): Record<string, string> {
+    return Object.fromEntries(Object.keys(obj).slice(0, n).map(k => [k, typeof obj[k]]));
 }
 
 export function probeIntlKey(rawFind: string): IntlProbe | null {
-    const m = rawFind.match(_intlKeyPattern());
+    const m = rawFind.match(_intlKeyPattern);
     if (!m?.[1]) return null;
     const hash = runtimeHashMessageKey(m[1]);
     return { intlKey: m[1], intlStatus: intlHashExistsInDefinitions(hash) ? "key_valid_but_unused" : "key_not_found" };
 }
 
-export function snippetAround(source: string, idx: number, matchLen: number, before = 60, after = 120): string {
-    return source.slice(Math.max(0, idx - before), Math.min(source.length, idx + matchLen + after));
-}
-
-export interface PluginPatchIteration {
-    name: string;
-    plugin: VencordPluginLike;
-    patch: PluginPatch;
-    patchIndex: number;
-    rawFind: string;
-    canonFind: string;
-}
-type VencordPluginLike = { started?: boolean; required?: boolean; patches?: PluginPatch[] };
-
-export function* iterPluginPatches(pluginsMap: Record<string, VencordPluginLike>, filter?: string): Generator<PluginPatchIteration> {
-    const lowerFilter = filter?.toLowerCase();
-    for (const [name, plugin] of Object.entries(pluginsMap)) {
-        if (lowerFilter && !name.toLowerCase().includes(lowerFilter)) continue;
-        if (!plugin.patches?.length) continue;
-        for (let patchIndex = 0; patchIndex < plugin.patches.length; patchIndex++) {
-            const patch = plugin.patches[patchIndex];
-            const rawFind = patchFindAsString(patch.find);
-            yield { name, plugin, patch, patchIndex, rawFind, canonFind: canonicalizeMatch(rawFind) };
-        }
-    }
-}
-
-export function forEachLoadedModule(cb: (id: string, exports: WebpackModule["exports"]) => boolean | void): void {
-    for (const [id, mod] of Object.entries(wreq.c) as [string, WebpackModule][]) {
-        if (!mod?.exports) continue;
-        if (cb(id, mod.exports) === false) return;
-    }
-}
-
 export const safeCall = tryOrElse;
-export { isNonNullish, isObject };
+export { isObject };
 
 export function safeProto(obj: object | null | undefined): object | null {
     if (!obj) return null;
     try { return Object.getPrototypeOf(obj); } catch { return null; }
 }
 
-export function filterByLowerIncludes<T>(items: readonly T[], query: string, key: (t: T) => string): T[] {
+export function filterBySubstring<T>(items: readonly T[], query: string, key: (t: T) => string): T[] {
     const lower = query.toLowerCase();
     return items.filter(item => key(item).toLowerCase().includes(lower));
 }
@@ -1062,12 +968,12 @@ export function rankedSuggestions(names: readonly string[], query: string, max: 
     return [...starts, ...contains].slice(0, max);
 }
 
-export function isClassComponent(v: unknown): boolean {
-    return typeof v === "function" && !!(v as { prototype?: { render?: unknown } }).prototype?.render;
-}
-
 export function missingArg(name: string): { error: true; message: string } {
     return { error: true, message: `${name} required` };
+}
+
+export function moduleNotFound(id: string): { error: true; message: string } {
+    return { error: true, message: `Module ${id} not found` };
 }
 
 export function getDescriptor(obj: object, proto: object | null, name: string): PropertyDescriptor | undefined {
@@ -1078,4 +984,11 @@ export function compileFilterRegex(pattern: string, flags = "i"): RegExp | null 
     try { return new RegExp(pattern, flags); } catch { return null; }
 }
 
-export { findAll, findStore, getIntlMessageFromHash, KEY_MAP, runtimeHashMessageKey };
+export function compileFilterRegexOrError(pattern: string, tool: string): RegExp | ToolError {
+    const regex = compileFilterRegex(pattern);
+    if (regex) return regex;
+    mcpLogger.warn(`${tool}: invalid filter regex "${pattern}"`);
+    return { error: true, message: `Invalid filter regex: ${pattern}` };
+}
+
+export { findStore, getIntlMessageFromHash, runtimeHashMessageKey };

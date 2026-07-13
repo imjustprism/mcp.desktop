@@ -1,32 +1,22 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 import { StoreToolArgs, ToolResult } from "../types";
-import { getFluxDispatcherInternal, resolveStore } from "../webpack";
+import { resolveStore } from "../webpack";
 import { LIMITS } from "./constants";
 import * as u from "./utils";
 
-function cap(v: unknown, max: number = LIMITS.STORE.SERIALIZE_CALL): unknown {
-    return u.isObject(v) ? u.serializeResult(v, max) : v;
+function capValue(v: unknown, max: number = LIMITS.STORE.SERIALIZE_CALL): unknown {
+    return v !== null && typeof v === "object" ? u.serializeResult(v, max) : v;
 }
 function typeOf(v: unknown): string {
     if (v === null) return "null";
-    if (v === undefined) return "undefined";
-    if (Array.isArray(v)) return "array";
-    return typeof v;
+    return Array.isArray(v) ? "array" : typeof v;
 }
 
-export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> {
+export async function handleStore(args: StoreToolArgs): Promise<ToolResult> {
     const { action, name: storeName, method, args: methodArgs } = args;
-    const depth = args.depth ?? 2;
-    const includeTypes = args.includeTypes ?? false;
 
     if (action === "list" || (!action && !storeName)) {
         const all = u.getAllStoreNames();
-        const filtered = storeName ? u.filterByLowerIncludes(all, storeName, s => s) : all;
+        const filtered = storeName ? u.filterBySubstring(all, storeName, s => s) : all;
         return {
             count: filtered.length,
             stores: filtered.slice(0, LIMITS.STORE.LIST_SLICE),
@@ -50,100 +40,59 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
             const methodLower = storeName.toLowerCase().replace(/[()]/g, "");
             for (const sn of validStores) {
                 if (methodMatches.length >= LIMITS.STORE.METHOD_MATCHES) break;
-                const s = u.safeCall<Record<string, unknown> | null>(() => u.findStore(sn) as Record<string, unknown>, null);
+                const s = u.safeCall<Record<string, unknown> | null>(() => u.findStore(sn), null);
                 if (!s) continue;
-                const proto = u.safeProto(s);
-                const names = [...(proto ? Object.getOwnPropertyNames(proto) : []), ...Object.getOwnPropertyNames(s)];
-                for (const nm of names) {
-                    if (nm.toLowerCase().includes(methodLower)) {
-                        methodMatches.push({ store: sn, method: nm });
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (methodMatches.length) {
-            return { error: true, message: `Store "${storeName}" not found`, methodMatches, suggestions: !looksLikeMethod && suggestions.length ? suggestions : undefined };
-        }
-
-        return { error: true, message: `Store "${storeName}" not found`, suggestions: suggestions.length ? suggestions : undefined };
-    }
-
-    const dispatcher = getFluxDispatcherInternal();
-
-    if (action === "snapshot") {
-        const proto = u.safeProto(store);
-        const allNames = [...new Set([...(proto ? Object.getOwnPropertyNames(proto) : []), ...Object.getOwnPropertyNames(store)])];
-        const snapshot: Record<string, unknown> = {};
-        let captured = 0;
-        for (const nm of allNames) {
-            if (nm === "constructor" || captured >= LIMITS.STORE.SNAPSHOT_MAX) continue;
-            const desc = u.getDescriptor(store, proto, nm);
-            const isZeroArgGetter = typeof store[nm] === "function" && nm.startsWith("get") && (store[nm] as Function).length === 0;
-            if (desc?.get || isZeroArgGetter) {
-                snapshot[nm] = u.safeCall(
-                    () => cap(desc?.get ? desc.get.call(store) : (store[nm] as () => unknown).call(store), LIMITS.STORE.SNAPSHOT_SERIALIZE),
-                    "<error>",
-                );
-                captured++;
-            }
-        }
-        return { store: resolvedName, snapshotAt: Date.now(), getterCount: captured, values: snapshot };
-    }
-
-    if (action === "subscriptions") {
-        const dispatchToken = store._dispatchToken as string | undefined;
-        const nodes = dispatcher._actionHandlers?._dependencyGraph?.nodes;
-        const subscriptions: string[] = [];
-
-        if (nodes) {
-            for (const nodeId in nodes) {
-                if (nodes[nodeId].name === resolvedName) {
-                    subscriptions.push(...Object.keys(nodes[nodeId].actionHandler ?? {}));
-                }
+                const nm = u.ownAndProtoNames(s, u.safeProto(s)).find(n => n.toLowerCase().includes(methodLower));
+                if (nm) methodMatches.push({ store: sn, method: nm });
             }
         }
 
         return {
-            found: true,
-            storeName: resolvedName,
-            dispatchToken,
-            subscriptionCount: subscriptions.length,
-            subscriptions: [...new Set(subscriptions)].sort(),
+            error: true,
+            message: `Store "${storeName}" not found`,
+            methodMatches: methodMatches.length ? methodMatches : undefined,
+            suggestions: suggestions.length && (!methodMatches.length || !looksLikeMethod) ? suggestions : undefined,
         };
     }
 
-    if (action === "methods") {
-        const levels: Array<{ level: number; methods: Array<{ name: string; type?: string }> }> = [];
-        let currentProto = u.safeProto(store);
-        let level = 0;
-
-        while (currentProto && level < depth) {
-            const methodNames = Object.getOwnPropertyNames(currentProto).filter(k => k !== "constructor").sort();
-            const methods: Array<{ name: string; type?: string }> = methodNames.map(nm => {
-                const entry: { name: string; type?: string } = { name: nm };
-                if (includeTypes) {
-                    entry.type = u.safeCall(() => {
-                        const val = store[nm];
-                        if (typeof val === "function" && nm.startsWith("get") && (val as Function).length === 0) {
-                            return typeOf((val as () => unknown).call(store));
-                        }
-                        return typeof val;
-                    }, "unknown");
-                }
-                return entry;
-            });
-            levels.push({ level, methods });
-            currentProto = u.safeProto(currentProto);
-            level++;
+    if (action === "snapshot") {
+        const proto = u.safeProto(store);
+        const allNames = u.ownAndProtoNames(store, proto);
+        const nameSet = new Set(allNames);
+        const snapshot: Record<string, unknown> = {};
+        let captured = 0;
+        let budget = LIMITS.STORE.SNAPSHOT_TOTAL_BUDGET;
+        let truncated = false;
+        for (const nm of allNames) {
+            if (nm === "constructor") continue;
+            if (captured >= LIMITS.STORE.SNAPSHOT_MAX) { truncated = true; break; }
+            if (nm.endsWith("Array") && nameSet.has(nm.slice(0, -"Array".length))) continue;
+            const desc = u.getDescriptor(store, proto, nm);
+            const isZeroArgGetter = !desc?.get && nm.startsWith("get") && u.safeCall(() => { const fn = store[nm]; return typeof fn === "function" && fn.length === 0; }, false);
+            if (desc?.get || isZeroArgGetter) {
+                if (budget <= 0) { truncated = true; break; }
+                const value = u.safeCall(
+                    () => capValue(desc?.get ? desc.get.call(store) : (store[nm] as () => unknown).call(store), LIMITS.STORE.SNAPSHOT_SERIALIZE),
+                    "<error>",
+                );
+                snapshot[nm] = value;
+                budget -= u.safeCall(() => JSON.stringify(value ?? null)?.length ?? 4, 4);
+                captured++;
+            }
         }
+        return { store: resolvedName, snapshotAt: Date.now(), getterCount: captured, truncated: truncated ? true : undefined, values: snapshot };
+    }
 
+    if (action === "links") {
+        const cc = store._changeCallbacks as { listeners?: { size?: number }; conditionalListeners?: { size?: number } } | undefined;
+        const syncWiths = store._syncWiths as Array<{ store?: { getName?: () => string } }> | undefined;
+        const syncsWith = (syncWiths ?? []).map(sw => u.safeCall(() => sw?.store?.getName?.() ?? "?", "?"));
         return {
-            found: true,
             store: resolvedName,
-            levels,
-            totalMethods: levels.reduce((acc, l) => acc + l.methods.length, 0),
+            dispatchToken: store._dispatchToken as string | undefined,
+            syncsWith,
+            listenerCount: cc?.listeners?.size ?? 0,
+            conditionalListenerCount: cc?.conditionalListeners?.size ?? 0,
         };
     }
 
@@ -154,34 +103,35 @@ export async function handleStoreTool(args: StoreToolArgs): Promise<ToolResult> 
         if (desc?.get) {
             try {
                 const value = desc.get.call(store);
-                return { found: true, property: method, isGetter: true, value: cap(value), valueType: typeOf(value) };
+                return { found: true, property: method, isGetter: true, value: capValue(value), valueType: typeOf(value) };
             } catch (e) {
-                return { found: true, property: method, isGetter: true, error: `Getter threw: ${e instanceof Error ? e.message : String(e)}` };
+                return { found: true, property: method, isGetter: true, error: `Getter threw: ${u.errMsg(e)}` };
             }
         }
 
         const fn = store[method];
         if (typeof fn === "function") {
             try {
-                const value = (fn as (...args: unknown[]) => unknown).apply(store, methodArgs ?? []);
-                return { found: true, method, value: cap(value), valueType: typeOf(value) };
+                const value = fn.apply(store, methodArgs ?? []);
+                return { found: true, method, value: capValue(value), valueType: typeOf(value) };
             } catch (e) {
-                return { found: true, method, error: `Method threw: ${e instanceof Error ? e.message : String(e)}` };
+                return { found: true, method, error: `Method threw: ${u.errMsg(e)}` };
             }
         }
 
-        if (fn !== undefined) return { found: true, property: method, value: cap(fn), valueType: typeof fn };
-        return { found: true, method, error: `"${method}" not found on store` };
+        if (fn !== undefined) return { found: true, property: method, value: capValue(fn), valueType: typeOf(fn) };
+        return { found: false, method, error: `"${method}" not found on store` };
     }
 
     const proto = u.safeProto(store);
-    const protoProps = proto ? Object.getOwnPropertyNames(proto).filter(n => n !== "constructor") : [];
-    const ownProps = Object.getOwnPropertyNames(store);
     const methods: string[] = [];
     const getters: string[] = [];
     const properties: string[] = [];
 
-    for (const nm of new Set([...protoProps, ...ownProps])) {
+    const memberFilter = method?.toLowerCase();
+    for (const nm of u.ownAndProtoNames(store, proto)) {
+        if (nm === "constructor") continue;
+        if (memberFilter && !nm.toLowerCase().includes(memberFilter)) continue;
         const desc = u.getDescriptor(store, proto, nm);
         if (desc?.get) getters.push(nm);
         else if (typeof store[nm] === "function") methods.push(nm);

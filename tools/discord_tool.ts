@@ -1,28 +1,11 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
-import { ChannelStore, DateUtils, GuildStore, Humanize, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
+import { ChannelStore, GuildStore, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
 
 import { DiscordAPIError, DiscordToolArgs, ToolResult } from "../types";
-import {
-    DesignTokensModule,
-    DiscordConstants,
-    Endpoints,
-    ExperimentStore,
-    findAll,
-    GatewayConnectionStore,
-    getCommonModules,
-    getSnowflakeUtils,
-    IconUtilsModule,
-    PlatformUtilsModule,
-} from "../webpack";
+import { DesignTokensModule, DiscordConstants, Endpoints, findAll, getCommonModules, getSnowflakeUtils } from "../webpack";
 import { LIMITS } from "./constants";
 import * as u from "./utils";
 
-export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResult> {
+export async function handleDiscord(args: DiscordToolArgs): Promise<ToolResult> {
     const { action, method, endpoint, body, id, filter: filterPattern, memberName } = args;
 
     if (action === "api") {
@@ -49,19 +32,12 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
         try {
             const utils = getSnowflakeUtils();
             const timestamp = utils.extractTimestamp(id);
-            const date = new Date(timestamp);
-            const snowflake = BigInt(id);
             return {
                 id,
                 valid: utils.isProbablyAValidSnowflake(id),
                 timestamp,
-                date: date.toISOString(),
+                date: new Date(timestamp).toISOString(),
                 unix: Math.floor(timestamp / 1000),
-                age: Humanize.relativeTime(date as unknown as number),
-                humanDate: DateUtils.calendarFormat(date),
-                workerId: Number((snowflake & 0x3e0000n) >> 17n),
-                processId: Number((snowflake & 0x1f000n) >> 12n),
-                increment: Number(snowflake & 0xfffn),
             };
         } catch {
             return { error: true, message: "Invalid snowflake ID" };
@@ -70,13 +46,9 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
 
     if (action === "endpoints") {
         if (!Endpoints) return { error: true, message: "Endpoints not found" };
-        const endpoints = Endpoints;
 
-        let entries = Object.entries(endpoints);
-        if (filterPattern) {
-            const lower = filterPattern.toLowerCase();
-            entries = entries.filter(([k]) => k.toLowerCase().includes(lower));
-        }
+        let entries = Object.entries(Endpoints);
+        if (filterPattern) entries = u.filterBySubstring(entries, filterPattern, ([k]) => k);
 
         const maxEndpoints = filterPattern ? LIMITS.DISCORD.ENDPOINTS_FILTERED : LIMITS.DISCORD.ENDPOINTS_DEFAULT;
         return {
@@ -87,7 +59,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
                     .slice(0, maxEndpoints)
                     .map(([k, v]) => {
                         if (typeof v !== "function") return [k, v];
-                        try { return [k, (v as (id1: string, id2: string) => string)("ID1", "ID2").slice(0, LIMITS.DISCORD.ENDPOINT_VALUE_SLICE)]; }
+                        try { return [k, v("ID1", "ID2").slice(0, LIMITS.DISCORD.ENDPOINT_VALUE_SLICE)]; }
                         catch { return [k, "(function)"]; }
                     }),
             ),
@@ -99,10 +71,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
         const common = getCommonModules();
 
         let keys = Object.keys(common);
-        if (filterPattern) {
-            const lower = filterPattern.toLowerCase();
-            keys = keys.filter(k => k.toLowerCase().includes(lower));
-        }
+        if (filterPattern) keys = u.filterBySubstring(keys, filterPattern, k => k);
 
         return {
             count: keys.length,
@@ -117,94 +86,22 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
     if (action === "enum") {
         if (!memberName) return u.missingArg("memberName");
 
+        const lowerFilter = filterPattern?.toLowerCase();
         const mods = findAll(m => {
             if (!m || typeof m !== "object") return false;
-            const val = (m as Record<string, unknown>)[memberName];
-            return val !== undefined && (typeof val === "number" || typeof val === "string");
+            const rec = m as Record<string, unknown>;
+            const val = rec[memberName];
+            if (val === undefined || (typeof val !== "number" && typeof val !== "string")) return false;
+            return !lowerFilter || Object.keys(rec).some(k => k.toLowerCase().includes(lowerFilter));
         });
 
         return {
             count: mods.length,
             matches: mods.slice(0, LIMITS.DISCORD.ENUM_MATCHES).map(mod => {
-                const keys = Object.keys(mod as object).filter(k => typeof (mod as Record<string, unknown>)[k] === "number" || typeof (mod as Record<string, unknown>)[k] === "string");
-                return { keys: keys.slice(0, LIMITS.DISCORD.ENUM_KEYS), sample: Object.fromEntries(keys.slice(0, LIMITS.DISCORD.ENUM_SAMPLE).map(k => [k, (mod as Record<string, unknown>)[k]])) };
+                const rec = mod as Record<string, unknown>;
+                const keys = Object.keys(rec).filter(k => typeof rec[k] === "number" || typeof rec[k] === "string");
+                return { keys: keys.slice(0, LIMITS.DISCORD.ENUM_KEYS), sample: Object.fromEntries(keys.slice(0, LIMITS.DISCORD.ENUM_SAMPLE).map(k => [k, rec[k]])) };
             }),
-        };
-    }
-
-    if (action === "memory") {
-        const { memory } = performance as any as { memory?: { usedJSHeapSize: number; totalJSHeapSize: number; jsHeapSizeLimit: number } };
-        if (!memory) return { error: true, message: "Memory API not available" };
-
-        return {
-            usedJSHeapSize: memory.usedJSHeapSize,
-            usedJSHeapSizeMB: Math.round(memory.usedJSHeapSize / 1024 / 1024),
-            totalJSHeapSize: memory.totalJSHeapSize,
-            totalJSHeapSizeMB: Math.round(memory.totalJSHeapSize / 1024 / 1024),
-            jsHeapSizeLimit: memory.jsHeapSizeLimit,
-            jsHeapSizeLimitMB: Math.round(memory.jsHeapSizeLimit / 1024 / 1024),
-            usagePercent: Math.round((memory.usedJSHeapSize / memory.jsHeapSizeLimit) * 100),
-        };
-    }
-
-    if (action === "performance") {
-        const resources = performance.getEntriesByType("resource") as PerformanceResourceTiming[];
-        const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-
-        const pageLoad = navigation ? Math.round(navigation.loadEventEnd - navigation.startTime) : null;
-        const domReady = navigation ? Math.round(navigation.domContentLoadedEventEnd - navigation.startTime) : null;
-
-        const resourceStats = {
-            total: resources.length,
-            byType: {} as Record<string, number>,
-            totalSize: 0,
-            slowest: [] as Array<{ name: string; duration: number }>,
-        };
-
-        for (const r of resources) {
-            const ext = r.name.split(".").pop()?.split("?")[0] ?? "unknown";
-            resourceStats.byType[ext] = (resourceStats.byType[ext] ?? 0) + 1;
-            resourceStats.totalSize += r.transferSize ?? 0;
-        }
-
-        resourceStats.slowest = [...resources]
-            .sort((a, b) => b.duration - a.duration)
-            .slice(0, LIMITS.DISCORD.SLOWEST_RESOURCES)
-            .map(r => ({ name: r.name.split("/").pop()?.slice(0, LIMITS.DISCORD.RESOURCE_NAME_SLICE) ?? "", duration: Math.round(r.duration) }));
-
-        return { pageLoadMs: pageLoad, domReadyMs: domReady, resources: resourceStats, now: Math.round(performance.now()) };
-    }
-
-    if (action === "waitForIpc") {
-        const timeout = args.timeout ?? 10000;
-        const start = Date.now();
-        while (Date.now() - start < timeout) {
-            if (UserStore.getCurrentUser()) return { ready: true, elapsed: Date.now() - start };
-            await new Promise(r => setTimeout(r, LIMITS.DISCORD.WAITFORIPC_POLL_MS));
-        }
-        return { ready: false, elapsed: Date.now() - start, message: "Timed out" };
-    }
-
-    if (action === "gateway") {
-        if (!GatewayConnectionStore) return { error: true, message: "GatewayConnectionStore not found" };
-
-        const socket = GatewayConnectionStore.getSocket();
-        if (!socket) return { connected: false, message: "No active gateway connection" };
-
-        const now = Date.now();
-        return {
-            connected: GatewayConnectionStore.isConnected(),
-            state: socket.connectionState_,
-            sessionId: socket.sessionId ? `${socket.sessionId.slice(0, LIMITS.DISCORD.SESSION_ID_SLICE)}...` : null,
-            sequence: socket.seq,
-            heartbeat: {
-                interval: socket.heartbeatInterval,
-                lastAck: socket.heartbeatAck,
-                latency: socket.lastHeartbeatAckTime && socket.lastHeartbeatTime ? socket.lastHeartbeatAckTime - socket.lastHeartbeatTime : null,
-            },
-            uptime: socket.connectionStartTime ? Math.round((now - socket.connectionStartTime) / 1000) : null,
-            identifyCount: socket.identifyCount,
-            resumeUrl: socket.resumeUrl,
         };
     }
 
@@ -214,8 +111,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
         const categories = Object.keys(DiscordConstants);
 
         if (filterPattern) {
-            const lower = filterPattern.toLowerCase();
-            const matching = categories.filter(k => k.toLowerCase().includes(lower));
+            const matching = u.filterBySubstring(categories, filterPattern, k => k);
 
             if (!matching.length) return { count: 0, categories: [], message: `No constant categories matching "${filterPattern}"` };
 
@@ -227,7 +123,7 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
                     results[key] = {
                         type: typeof val,
                         keyCount: entries.length,
-                        sample: Object.fromEntries(entries.slice(0, 20).map(([k, v]) => [k, typeof v === "function" ? "(function)" : v])),
+                        sample: Object.fromEntries(entries.slice(0, LIMITS.DISCORD.CONSTANTS_SAMPLE).map(([k, v]) => [k, typeof v === "function" ? "(function)" : v])),
                     };
                 } else {
                     results[key] = val;
@@ -236,92 +132,11 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             return { count: matching.length, entries: results };
         }
 
-        const summary: Record<string, { type: string; keyCount?: number }> = {};
-        for (const key of categories) {
+        const summary = Object.fromEntries(categories.map(key => {
             const val = DiscordConstants[key];
-            summary[key] = {
-                type: typeof val,
-                keyCount: val && typeof val === "object" ? Object.keys(val as object).length : undefined,
-            };
-        }
+            return [key, { type: typeof val, keyCount: val && typeof val === "object" ? Object.keys(val).length : undefined }];
+        }));
         return { count: categories.length, categories: summary };
-    }
-
-    if (action === "experiments") {
-        if (!ExperimentStore) return { error: true, message: "ExperimentStore not found" };
-
-        const store = ExperimentStore as Record<string, (...args: unknown[]) => unknown>;
-
-        if (filterPattern) {
-            try {
-                const all = store.getRegisteredExperiments?.() as Record<string, unknown> | undefined;
-                if (all) {
-                    const lower = filterPattern.toLowerCase();
-                    const matches: Array<{ name: string; type: string }> = [];
-                    for (const [name, exp] of Object.entries(all)) {
-                        if (name.toLowerCase().includes(lower) && matches.length < LIMITS.DISCORD.EXPERIMENT_SLICE) {
-                            matches.push({ name, type: typeof exp });
-                        }
-                    }
-                    return { count: matches.length, experiments: matches };
-                }
-            } catch {
-                return { error: true, message: "Failed to query experiments" };
-            }
-        }
-
-        try {
-            const registered = store.getRegisteredExperiments?.() as Record<string, unknown> | undefined;
-            const overrides = store.getAllExperimentOverrideDescriptors?.() as Record<string, unknown> | undefined;
-            const assignments = store.getAllExperimentAssignments?.() as Record<string, unknown> | undefined;
-
-            return {
-                registeredCount: registered ? Object.keys(registered).length : 0,
-                overrideCount: overrides ? Object.keys(overrides).length : 0,
-                assignmentCount: assignments ? Object.keys(assignments).length : 0,
-                sampleRegistered: registered ? Object.keys(registered).slice(0, LIMITS.DISCORD.EXPERIMENT_SLICE) : undefined,
-                sampleOverrides: overrides ? Object.keys(overrides).slice(0, 10) : undefined,
-            };
-        } catch (e) {
-            return { error: true, message: `ExperimentStore error: ${e instanceof Error ? e.message : String(e)}` };
-        }
-    }
-
-    if (action === "platform") {
-        if (!PlatformUtilsModule) return { error: true, message: "PlatformUtils not found" };
-
-        const p = PlatformUtilsModule;
-        const env = (window as any).GLOBAL_ENV as Record<string, unknown> | undefined;
-
-        const safeBoolCall = (fn: unknown) => {
-            try {
-                return (fn as () => boolean)();
-            } catch {
-                return null;
-            }
-        };
-
-        return {
-            platform: p.getPlatform(),
-            platformName: p.getPlatformName(),
-            os: p.getOS(),
-            isDesktop: safeBoolCall(p.isDesktop),
-            isWeb: safeBoolCall(p.isWeb),
-            isWindows: safeBoolCall(p.isWindows),
-            isLinux: safeBoolCall(p.isLinux),
-            isMac: safeBoolCall(p.isMac),
-            isPlatformEmbedded: safeBoolCall(p.isPlatformEmbedded),
-            env: env
-                ? {
-                      releaseChannel: env.RELEASE_CHANNEL,
-                      buildNumber: env.BUILD_NUMBER,
-                      versionHash: (env.VERSION_HASH as string)?.slice(0, 16),
-                      apiEndpoint: env.API_ENDPOINT,
-                      gatewayEndpoint: env.GATEWAY_ENDPOINT,
-                      cdnHost: env.CDN_HOST,
-                  }
-                : undefined,
-        };
     }
 
     if (action === "tokens") {
@@ -329,11 +144,11 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
 
         const t = DesignTokensModule;
         const colorKeys = Object.keys(t.colors ?? {});
-        const rawColorKeys = Object.keys(t.unsafe_rawColors ?? {});
 
         if (filterPattern) {
-            const lower = filterPattern.toLowerCase();
-            const matchingColors = colorKeys.filter(k => k.toLowerCase().includes(lower));
+            const norm = (s: string) => s.toLowerCase().replace(/[-_]/g, "");
+            const q = norm(filterPattern);
+            const matchingColors = colorKeys.filter(k => norm(k).includes(q) || norm(t.colors[k]?.css ?? "").includes(q));
             const colorDetails = matchingColors.slice(0, LIMITS.DISCORD.TOKEN_COLOR_SLICE).map(k => ({
                 name: k,
                 cssVar: t.colors[k]?.css,
@@ -341,51 +156,17 @@ export async function handleDiscordTool(args: DiscordToolArgs): Promise<ToolResu
             return { query: filterPattern, colorCount: matchingColors.length, colors: colorDetails };
         }
 
-        const themes = Object.keys(t.themes ?? {});
-        const shadows = Object.keys(t.shadows ?? {});
-        const themeEnum = Object.fromEntries(Object.entries(t.themes ?? {}).filter(([, v]) => typeof v === "string"));
-
         return {
             semanticColors: colorKeys.length,
-            rawColors: rawColorKeys.length,
-            themes,
-            themeEnum,
-            shadows: shadows.slice(0, 15),
+            rawColors: Object.keys(t.unsafe_rawColors ?? {}).length,
+            themes: Object.keys(t.themes ?? {}),
+            themeEnum: Object.fromEntries(Object.entries(t.themes ?? {}).filter(([, v]) => typeof v === "string")),
+            shadows: Object.keys(t.shadows ?? {}).slice(0, LIMITS.DISCORD.TOKEN_SHADOWS_SLICE),
             radii: t.radii,
             spacing: t.spacing,
             modules: t.modules ? Object.keys(t.modules) : undefined,
             sampleColors: colorKeys.slice(0, LIMITS.DISCORD.TOKEN_COLOR_SLICE).map(k => ({ name: k, css: t.colors[k]?.css })),
             tip: "Use filter to search colors by name",
-        };
-    }
-
-    if (action === "icons") {
-        if (!IconUtilsModule) return { error: true, message: "IconUtils not found" };
-
-        const all = Object.keys(IconUtilsModule).filter(k => typeof IconUtilsModule[k] === "function");
-        const matched = args.filter ? all.filter(k => k.toLowerCase().includes(args.filter!.toLowerCase())) : all;
-        const functions = matched.slice(0, LIMITS.DISCORD.ICON_UTIL_FUNCTIONS);
-
-        return {
-            total: all.length,
-            filtered: matched.length,
-            functionCount: functions.length,
-            functions,
-            tip: "Use evaluateCode to call functions, e.g. IconUtils.getUserAvatarURL(user)",
-        };
-    }
-
-    if (action === "buildInfo") {
-        const env = (window as any).GLOBAL_ENV as Record<string, unknown> | undefined;
-        const p = PlatformUtilsModule;
-        return {
-            buildNumber: env?.BUILD_NUMBER ?? null,
-            versionHash: env?.VERSION_HASH ?? null,
-            releaseChannel: env?.RELEASE_CHANNEL ?? null,
-            apiEndpoint: env?.API_ENDPOINT ?? null,
-            platform: p?.getPlatform?.() ?? null,
-            os: p?.getOS?.() ?? null,
-            nativeBuildNumber: env?.NATIVE_BUILD_NUMBER ?? null,
         };
     }
 

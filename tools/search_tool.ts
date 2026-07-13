@@ -1,43 +1,35 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 import { canonicalizeMatch } from "@utils/patches";
 
-import { SearchToolArgs } from "../types";
+import { SearchToolArgs, ToolResult } from "../types";
 import { search } from "../webpack";
-import { CONTEXT } from "./constants";
+import { CONTEXT, LIMITS } from "./constants";
 import * as u from "./utils";
 
-export async function handleSearchTool(args: SearchToolArgs): Promise<unknown> {
+export async function handleSearch(args: SearchToolArgs): Promise<ToolResult> {
     const { pattern, patterns } = args;
-    const limit = args.limit ?? 10;
+    const limit = args.limit ?? LIMITS.SEARCH.DEFAULT_LIMIT;
     const forceRegex = args.regex ?? false;
+    if (args.limit !== undefined && args.limit < 1) return { error: true, message: "limit must be >= 1 (omit for default)" };
 
     if (patterns?.length) {
-        if (patterns.length < 2) return { error: true, message: "patterns needs at least 2 entries, use pattern for single search" };
-        if (patterns.length > 10) return { error: true, message: "Max 10 patterns" };
+        if (patterns.length < LIMITS.SEARCH.MIN_PATTERNS) return { error: true, message: `patterns must have at least ${LIMITS.SEARCH.MIN_PATTERNS} entries. Use pattern for single search` };
+        if (patterns.length > LIMITS.SEARCH.MAX_PATTERNS) return { error: true, message: `patterns must have at most ${LIMITS.SEARCH.MAX_PATTERNS} entries` };
 
         const canonPatterns = patterns.map(p => canonicalizeMatch(p));
         const matches: Array<{ id: string; hint?: string | null; matchedPatterns: number; snippets: string[] }> = [];
+        let count = 0;
 
         for (const moduleId of u.getModuleIds()) {
-            if (matches.length >= limit) break;
             const source = u.getModuleSource(moduleId);
-            if (canonPatterns.every(p => source.includes(p))) {
-                const snippets = canonPatterns.map(p => {
-                    const idx = source.indexOf(p);
-                    const start = Math.max(0, idx - 30);
-                    const end = Math.min(source.length, idx + p.length + 50);
-                    return source.slice(start, end);
-                });
+            if (!canonPatterns.every(p => source.includes(p))) continue;
+            count++;
+            if (matches.length < limit) {
+                const snippets = canonPatterns.map(p => u.snippet(source, source.indexOf(p), p.length, LIMITS.SEARCH.CANON_SNIPPET_BEFORE, LIMITS.SEARCH.CANON_SNIPPET_AFTER));
                 matches.push({ id: moduleId, hint: u.getModuleHint(moduleId), matchedPatterns: canonPatterns.length, snippets });
             }
         }
 
-        return { multiPattern: true, patterns, count: matches.length, matches };
+        return { multiPattern: true, patterns, count, matches };
     }
 
     if (!pattern) return u.missingArg("pattern");
@@ -50,42 +42,35 @@ export async function handleSearchTool(args: SearchToolArgs): Promise<unknown> {
     }
     if (regex) {
         const searchRegex = canonicalizeMatch(regex);
-        const matches: Array<{ id: string; hint?: string | null; match: string; context: string }> = [];
-        const results = search(searchRegex);
 
-        for (const id of Object.keys(results)) {
+        const indexRegex = u.stripGlobal(searchRegex);
+        const matches: Array<{ id: string; hint?: string | null; match: string; context: string }> = [];
+        const ids = Object.keys(search(searchRegex));
+
+        for (const id of ids) {
             if (matches.length >= limit) break;
 
             const source = u.getModuleSource(id);
-            const match = source.match(searchRegex);
+            const match = source.match(indexRegex);
 
             if (match?.index !== undefined) {
-                const start = Math.max(0, match.index - CONTEXT.SEARCH_SNIPPET);
-                const end = Math.min(source.length, match.index + match[0].length + CONTEXT.SEARCH_SNIPPET);
-                matches.push({ id, hint: u.getModuleHint(id), match: match[0].slice(0, 100), context: source.slice(start, end) });
+                matches.push({ id, hint: u.getModuleHint(id), match: match[0].slice(0, LIMITS.SEARCH.MATCH_PREVIEW), context: u.snippet(source, match.index, match[0].length, CONTEXT.SEARCH_SNIPPET, CONTEXT.SEARCH_SNIPPET) });
             }
         }
 
-        return { count: matches.length, pattern, matches };
+        return { count: ids.length, pattern, matches };
     }
 
     const canonicalized = canonicalizeMatch(pattern);
-    const results = search(pattern);
-    const ids = Object.keys(results).slice(0, limit);
+    const keys = Object.keys(search(pattern));
+    const ids = keys.slice(0, limit);
 
     return {
-        count: Object.keys(results).length,
+        count: keys.length,
         ids,
         preview: ids.map(id => {
             const source = u.getModuleSource(id);
-            const idx = source.indexOf(canonicalized);
-            const hint = u.getModuleHint(id);
-            if (idx !== -1) {
-                const start = Math.max(0, idx - CONTEXT.SEARCH_SNIPPET);
-                const end = Math.min(source.length, idx + canonicalized.length + CONTEXT.SEARCH_SNIPPET);
-                return { id, hint, snippet: source.slice(start, end) };
-            }
-            return { id, hint, snippet: source.slice(0, 200) };
+            return { id, hint: u.getModuleHint(id), snippet: u.snippet(source, source.indexOf(canonicalized), canonicalized.length, CONTEXT.SEARCH_SNIPPET, CONTEXT.SEARCH_SNIPPET) };
         }),
     };
 }

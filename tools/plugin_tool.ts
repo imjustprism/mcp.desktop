@@ -1,11 +1,3 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
-import { canonicalizeMatch } from "@utils/patches";
-
 import { PluginOption, PluginToolArgs, ToolResult } from "../types";
 import { plugins, pluginSettings, startPlugin, stopPlugin } from "../webpack";
 import { LIMITS, OPTION_TYPE_NAMES } from "./constants";
@@ -15,7 +7,7 @@ function ensurePluginSettings(name: string) {
     return (pluginSettings[name] ??= {});
 }
 
-export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult> {
+export async function handlePlugin(args: PluginToolArgs): Promise<ToolResult> {
     const { action, name, setting: settingKey, value: settingValue } = args;
     const showPatches = args.showPatches ?? false;
     const validate = args.validate ?? false;
@@ -44,21 +36,15 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         }
 
         const settings = ensurePluginSettings(pluginName);
-        const hasPatches = plugin.patches?.length;
-        if (hasPatches) {
+        if (plugin.patches?.length) {
             settings.enabled = shouldEnable;
             return { success: true, name: pluginName, enabled: shouldEnable, requiresRestart: true, message: `${shouldEnable ? "Enabled" : "Disabled"}, restart required` };
         }
 
-        if (shouldEnable) {
-            settings.enabled = true;
-            const success = startPlugin(plugin as Parameters<typeof startPlugin>[0]);
-            return { success, name: pluginName, enabled: success, message: success ? "Enabled" : "Failed to start" };
-        }
-
-        const success = stopPlugin(plugin as Parameters<typeof stopPlugin>[0]);
-        if (success) settings.enabled = false;
-        return { success, name: pluginName, enabled: !success, message: success ? "Disabled" : "Failed to stop" };
+        if (shouldEnable) settings.enabled = true;
+        const success = shouldEnable ? startPlugin(plugin as Parameters<typeof startPlugin>[0]) : stopPlugin(plugin as Parameters<typeof stopPlugin>[0]);
+        if (!shouldEnable && success) settings.enabled = false;
+        return { success, name: pluginName, enabled: success ? shouldEnable : isEnabled, message: success ? (shouldEnable ? "Enabled" : "Disabled") : `Failed to ${shouldEnable ? "start" : "stop"}` };
     }
 
     if (action === "settings" || action === "setSetting") {
@@ -69,21 +55,14 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         const { plugin, name: pluginName } = result;
 
         const currentSettings = pluginSettings[pluginName] ?? {};
-        const options = plugin.options ?? {};
+
+        const options: Record<string, PluginOption> = plugin.settings?.def ?? plugin.options ?? {};
 
         if (action === "settings") {
-            const settingsInfo: Record<string, { type: string; description?: string; currentValue: unknown; default?: unknown; options?: unknown }> = {};
-
-            for (const [key, opt] of Object.entries(options) as [string, PluginOption][]) {
+            const settingsInfo = Object.fromEntries(Object.entries(options).map(([key, opt]) => {
                 const o = opt as PluginOption & { description?: string; default?: unknown; options?: unknown };
-                settingsInfo[key] = {
-                    type: OPTION_TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN",
-                    description: o.description,
-                    currentValue: currentSettings[key] ?? o.default,
-                    default: o.default,
-                    options: o.options,
-                };
-            }
+                return [key, { type: OPTION_TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN", description: o.description, currentValue: currentSettings[key] ?? o.default, default: o.default, options: o.options }];
+            }));
 
             return { name: pluginName, enabled: plugin.started ?? false, settingsCount: Object.keys(options).length, settings: settingsInfo };
         }
@@ -99,7 +78,7 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
     }
 
     let pluginList = Object.entries(plugins);
-    if (name) pluginList = u.filterByLowerIncludes(pluginList, name, ([nm]) => nm);
+    if (name) pluginList = u.filterBySubstring(pluginList, name, ([nm]) => nm);
 
     const maxPlugins = name ? LIMITS.PLUGIN.LIST_MAX_FILTERED : LIMITS.PLUGIN.LIST_MAX_DEFAULT;
     const pluginInfos = pluginList.slice(0, maxPlugins).map(([nm, plugin]) => {
@@ -115,17 +94,17 @@ export async function handlePluginTool(args: PluginToolArgs): Promise<ToolResult
         if (showPatches && plugin.patches) {
             info.patches = plugin.patches.slice(0, LIMITS.PLUGIN.PATCHES_SLICE).map(p => ({
                 find: u.patchFindAsString(p.find).slice(0, LIMITS.PLUGIN.FIND_SLICE),
-                replacementCount: Array.isArray(p.replacement) ? p.replacement.length : 1,
+                replacementCount: u.getReplacements(p).length,
             }));
         }
 
         if (validate && plugin.patches) {
             const ok = plugin.patches.filter(p => {
-                const canon = p.find != null ? canonicalizeMatch(p.find) : "";
-                return u.countModuleMatchesFast(typeof canon === "string" ? canon : canon.source, 2) === 1;
+                const m = u.canonFindMatcher(p.find);
+                return (m.isRegex ? u.findModuleIds(m.test, 2).length : u.countModuleMatches(m.canonical, 2)) === 1;
             }).length;
             const broken = plugin.patches.length - ok;
-            info.health = { ok, broken, status: broken === 0 ? "HEALTHY" : broken < plugin.patches.length / 2 ? "DEGRADED" : "BROKEN" };
+            info.health = { ok, broken, status: u.healthStatus(broken, plugin.patches.length) };
         }
 
         return info;

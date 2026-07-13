@@ -1,18 +1,10 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
-import { FiberMemoizedState, FiberNode, FoundComponent, HookInfo, ReactFiber, ReactToolArgs, ToolResult, TreeNode } from "../types";
-import { CSS_CLASS_CAPTURE_RE, INTERESTING_PROP_KEYWORDS, LIMITS } from "./constants";
+import { FiberNode, FoundComponent, HookInfo, ReactFiber, ReactToolArgs, ToolResult, TreeNode } from "../types";
+import { COMPONENT_FIBER_TAGS, CSS_CLASS_CAPTURE_RE, FIBER_TAGS, LIMITS } from "./constants";
 import * as u from "./utils";
 
 function getReactRoot(): ReactFiber | null {
     const container = document.getElementById("app-mount");
-    if (!container) return null;
-    const rootKey = Object.keys(container).find(k => k.startsWith("__reactContainer$"));
-    return rootKey ? ((container as any)[rootKey] as ReactFiber) : null;
+    return container && u.fiberFromKey(container, "__reactContainer$");
 }
 
 function findElement(selector: string): Element | { error: true; message: string } {
@@ -25,26 +17,22 @@ function findElement(selector: string): Element | { error: true; message: string
 }
 
 function walkFiberUp(fiber: ReactFiber | null, maxDepth: number, predicate: (f: ReactFiber) => boolean): ReactFiber | null {
-    let current = fiber;
-    let depth = 0;
-    while (current && depth < maxDepth) {
-        if (predicate(current)) return current;
-        current = current.return ?? null;
-        depth++;
-    }
+    for (const { fiber: f } of u.fibersUp(fiber, maxDepth)) if (predicate(f)) return f;
     return null;
 }
 
-export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> {
+export async function handleReact(args: ReactToolArgs): Promise<ToolResult> {
     const { action, selector, componentName } = args;
-    if (args.limit === 0) return { error: true, message: "limit must be >= 1 (use omit for default)" };
-    if (args.depth === 0) return { error: true, message: "depth must be >= 1 (use omit for default)" };
-    const maxDepth = u.clamp(args.depth, 10, 1, LIMITS.REACT.MAX_DEPTH);
+    if (args.limit === 0) return { error: true, message: "limit must be >= 1 (omit for default)" };
+    if (args.depth === 0) return { error: true, message: "depth must be >= 1 (omit for default)" };
+    const maxDepth = u.clamp(args.depth, LIMITS.REACT.DEFAULT_DEPTH, 1, LIMITS.REACT.MAX_DEPTH);
     const direction = args.direction ?? "up";
     const includeProps = args.includeProps ?? false;
-    const limit = u.clamp(args.limit, 20, 1, LIMITS.REACT.MAX_LIMIT);
+    const limit = u.clamp(args.limit, LIMITS.REACT.DEFAULT_LIMIT, 1, LIMITS.REACT.MAX_LIMIT);
 
     if (!action) return u.missingArg("action");
+
+    const fiberMiss = (hasFiber: boolean, message: string, extra?: Record<string, unknown>) => ({ found: true, selector, hasFiber, ...extra, message });
 
     if (action === "find") {
         if (!componentName) return u.missingArg("componentName");
@@ -59,34 +47,19 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         const found: FoundComponent[] = [];
         const seenSelectors = new Set<string>();
 
+        const elementToSelector = (el: Element): string => {
+            const tag = el.tagName.toLowerCase();
+            return el.id ? `#${el.id}` : el.classList?.[0] ? `${tag}.${el.classList[0]}` : tag;
+        };
+
         const getSelectorForFiber = (f: ReactFiber): string => {
-            let selectorStr = "";
-            let current: ReactFiber | null = f;
-
-            while (current && !selectorStr) {
-                if (current.stateNode instanceof Element) {
-                    const el = current.stateNode;
-                    const tag = el.tagName.toLowerCase();
-                    selectorStr = el.id ? `#${el.id}` : el.classList?.[0] ? `${tag}.${el.classList[0]}` : tag;
-                }
-                current = current.child ?? null;
+            for (let current: ReactFiber | null = f; current; current = current.child ?? null) {
+                if (current.stateNode instanceof Element) return elementToSelector(current.stateNode);
             }
-
-            if (!selectorStr) {
-                current = f.return ?? null;
-                let upDepth = 0;
-                while (current && !selectorStr && upDepth < LIMITS.REACT.PARENT_SEARCH_DEPTH) {
-                    if (current.stateNode instanceof Element) {
-                        const el = current.stateNode;
-                        const tag = el.tagName.toLowerCase();
-                        selectorStr = el.id ? `#${el.id}` : el.classList?.[0] ? `${tag}.${el.classList[0]}` : tag;
-                    }
-                    current = current.return ?? null;
-                    upDepth++;
-                }
+            for (const { fiber: current } of u.fibersUp(f.return ?? null, LIMITS.REACT.PARENT_SEARCH_DEPTH)) {
+                if (current.stateNode instanceof Element) return elementToSelector(current.stateNode);
             }
-
-            return selectorStr || "(no DOM element)";
+            return "(no DOM element)";
         };
 
         const queue: Array<{ fiber: ReactFiber; depth: number }> = [{ fiber: rootFiber, depth: 0 }];
@@ -98,35 +71,24 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             processed++;
 
             const info = u.getComponentInfo(f);
-            const isComponentFiber = f.tag === 0 || f.tag === 1 || f.tag === 11 || f.tag === 14 || f.tag === 15;
-
-            if (info.name?.toLowerCase().includes(lowerName)) {
+            const record = (dedupeKey: string, propKeys?: string[]) => {
                 const selectorStr = getSelectorForFiber(f);
-                const key = `name:${info.name}:${selectorStr}`;
-                if (!seenSelectors.has(key)) {
-                    seenSelectors.add(key);
-                    found.push({ name: info.name, selector: selectorStr, tagType: info.tagType, fiberDepth: depth, matchedBy: "name" });
-                }
-            } else if (includeByProps && isComponentFiber && f.memoizedProps) {
-                const props = f.memoizedProps as Record<string, unknown>;
-                const propKeys = Object.keys(props).filter(k => k !== "children" && k.length > LIMITS.REACT.PROP_FILTER_MIN_LENGTH);
-                const matchingProps = propKeys.filter(k => k.toLowerCase().includes(lowerName));
-
-                if (matchingProps.length) {
-                    const selectorStr = getSelectorForFiber(f);
-                    const key = `props:${matchingProps.sort().join(",")}:${selectorStr}`;
-                    if (!seenSelectors.has(key)) {
-                        seenSelectors.add(key);
-                        found.push({
-                            name: info.name,
-                            selector: selectorStr,
-                            tagType: info.tagType,
-                            fiberDepth: depth,
-                            matchedBy: "props",
-                            propKeys: matchingProps.slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW),
-                        });
-                    }
-                }
+                const key = `${dedupeKey}:${selectorStr}`;
+                if (seenSelectors.has(key)) return;
+                seenSelectors.add(key);
+                found.push({
+                    name: info.name,
+                    selector: selectorStr,
+                    tagType: info.tagType,
+                    fiberDepth: depth,
+                    matchedBy: propKeys ? "props" : "name",
+                    ...(propKeys && { propKeys: propKeys.slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW) }),
+                });
+            };
+            if (info.name?.toLowerCase().includes(lowerName)) record(`name:${info.name}`);
+            else if (includeByProps && COMPONENT_FIBER_TAGS.has(f.tag) && f.memoizedProps) {
+                const matchingProps = Object.keys(f.memoizedProps).filter(k => k !== "children" && k.length > LIMITS.REACT.PROP_FILTER_MIN_LENGTH && k.toLowerCase().includes(lowerName));
+                if (matchingProps.length) record(`props:${matchingProps.sort().join(",")}`, matchingProps);
             }
 
             if (f.child) queue.push({ fiber: f.child, depth: depth + 1 });
@@ -144,54 +106,6 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         };
     }
 
-    if (action === "root") {
-        const rootFiber = getReactRoot();
-        if (!rootFiber) return { error: true, message: "React root not found" };
-
-        const tagCounts: Record<string, number> = {};
-        const namedComponents: string[] = [];
-        const interestingPropPatterns = new Set<string>();
-        const queue: ReactFiber[] = [rootFiber];
-        let qHead = 0;
-        let processed = 0;
-
-        while (qHead < queue.length && processed < LIMITS.REACT.MAX_PROCESS) {
-            const f = queue[qHead++];
-            processed++;
-
-            const info = u.getComponentInfo(f);
-            tagCounts[info.tagType] = (tagCounts[info.tagType] ?? 0) + 1;
-
-            if (info.name && info.tagType !== "DOM" && info.tagType !== "Text" && namedComponents.length < LIMITS.REACT.MAX_NAMED_COMPONENTS && !namedComponents.includes(info.name)) {
-                namedComponents.push(info.name);
-            }
-
-            if ((f.tag === 0 || f.tag === 1) && f.memoizedProps && interestingPropPatterns.size < LIMITS.REACT.MAX_STYLES) {
-                const props = f.memoizedProps as Record<string, unknown>;
-                for (const key of Object.keys(props).filter(k => k !== "children" && k.length > LIMITS.REACT.PROP_FILTER_MIN_LENGTH)) {
-                    const lower = key.toLowerCase();
-                    if ([...INTERESTING_PROP_KEYWORDS].some(kw => lower.includes(kw))) {
-                        interestingPropPatterns.add(key);
-                    }
-                }
-            }
-
-            if (f.child) queue.push(f.child);
-            if (f.sibling) queue.push(f.sibling);
-        }
-
-        const mode = rootFiber.mode ?? 0;
-        return {
-            found: true,
-            fiberCount: processed,
-            mode: { raw: mode, concurrent: !!(mode & 1), strict: !!(mode & 8) },
-            tagCounts,
-            namedComponents: namedComponents.sort(),
-            searchableProps: [...interestingPropPatterns].sort(),
-            note: processed >= LIMITS.REACT.MAX_PROCESS ? `Stopped at ${LIMITS.REACT.MAX_PROCESS} nodes` : undefined,
-        };
-    }
-
     if (!selector) return { error: true, message: `selector required for "${action}"` };
 
     const elResult = findElement(selector);
@@ -199,53 +113,24 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     const el = elResult;
 
     if (action === "query") {
-        const includeText = args.includeText ?? false;
-
-        let elements: NodeListOf<Element>;
-        try {
-            elements = document.querySelectorAll(selector);
-        } catch (e) {
-            return { error: true, message: `Invalid selector "${selector}": ${e instanceof Error ? e.message : "syntax error"}` };
-        }
-
-        const results: Array<{
-            index: number;
-            tagName: string;
-            id?: string;
-            className: string | null;
-            cssHint?: string;
-            attributes: Record<string, string>;
-            text?: string;
-            rect: { top: number; left: number; width: number; height: number };
-        }> = [];
-
-        for (let i = 0; i < Math.min(elements.length, limit); i++) {
-            const elem = elements[i];
+        const elements = document.querySelectorAll(selector);
+        const results = Array.from(elements).slice(0, limit).map((elem, index) => {
             const rect = elem.getBoundingClientRect();
             const attrs: Record<string, string> = {};
-
-            for (const attr of elem.attributes) {
-                if (!attr.name.startsWith("__react") && attrs[attr.name] === undefined) {
-                    attrs[attr.name] = attr.value.slice(0, LIMITS.REACT.ATTR_VALUE_SLICE);
-                }
-            }
-
+            for (const attr of elem.attributes) if (!attr.name.startsWith("__react") && attrs[attr.name] === undefined) attrs[attr.name] = attr.value.slice(0, LIMITS.REACT.ATTR_VALUE_SLICE);
             const classStr = elem.className?.toString() ?? "";
-            const entry: (typeof results)[0] = {
-                index: i,
+            const cssMatch = CSS_CLASS_CAPTURE_RE.exec(classStr);
+            return {
+                index,
                 tagName: elem.tagName,
                 id: elem.id || undefined,
                 className: classStr.slice(0, LIMITS.REACT.CLASS_NAME_SLICE) || null,
                 attributes: attrs,
                 rect: { top: Math.round(rect.top), left: Math.round(rect.left), width: Math.round(rect.width), height: Math.round(rect.height) },
+                ...(cssMatch && { cssHint: `module className="${cssMatch[1]}" for CSS module lookup` }),
+                ...(args.includeText && { text: elem.textContent?.slice(0, LIMITS.REACT.ATTR_VALUE_SLICE) || "" }),
             };
-
-            const cssMatch = CSS_CLASS_CAPTURE_RE.exec(classStr);
-            if (cssMatch) entry.cssHint = `module className="${cssMatch[1]}" for CSS module lookup`;
-
-            if (includeText) entry.text = elem.textContent?.slice(0, LIMITS.REACT.ATTR_VALUE_SLICE) || "";
-            results.push(entry);
-        }
+        });
 
         return { selector, total: elements.length, returned: results.length, elements: results, note: elements.length > limit ? `${limit} of ${elements.length} shown` : undefined };
     }
@@ -272,45 +157,8 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         return { found: true, selector, tagName: el.tagName, styleCount: Object.keys(styles).length, styles };
     }
 
-    if (action === "modify") {
-        const { styles, addClass, removeClass, setAttribute } = args;
-
-        if (!styles && !addClass && !removeClass && !setAttribute) {
-            return { error: true, message: "Provide styles, addClass, removeClass, or setAttribute" };
-        }
-
-        const htmlEl = el as HTMLElement;
-        const changes: string[] = [];
-
-        if (styles) {
-            for (const [prop, value] of Object.entries(styles).slice(0, LIMITS.REACT.STYLE_MODIFY_MAX)) {
-                htmlEl.style.setProperty(prop, value);
-                changes.push(`style.${prop} = ${value}`);
-            }
-        }
-
-        if (addClass) {
-            htmlEl.classList.add(...addClass.split(" ").filter(Boolean));
-            changes.push(`added class: ${addClass}`);
-        }
-
-        if (removeClass) {
-            htmlEl.classList.remove(...removeClass.split(" ").filter(Boolean));
-            changes.push(`removed class: ${removeClass}`);
-        }
-
-        if (setAttribute) {
-            for (const [attr, value] of Object.entries(setAttribute).slice(0, LIMITS.REACT.SET_ATTRIBUTE_MAX)) {
-                htmlEl.setAttribute(attr, value);
-                changes.push(`${attr} = ${value}`);
-            }
-        }
-
-        return { found: true, selector, changes, note: "Temporary, lost on re-render" };
-    }
-
     if (action === "tree") {
-        const breadth = u.clamp(args.breadth, 10, 1, LIMITS.REACT.MAX_BREADTH);
+        const breadth = u.clamp(args.breadth, LIMITS.REACT.DEFAULT_BREADTH, 1, LIMITS.REACT.MAX_BREADTH);
 
         const buildNode = (node: Element, d: number): TreeNode => {
             const info: TreeNode = { tag: node.tagName.toLowerCase() };
@@ -333,18 +181,6 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         return { found: true, selector, tree: buildNode(el, maxDepth) };
     }
 
-    if (action === "text") {
-        const textContent = el.textContent?.trim().slice(0, LIMITS.REACT.TEXT_CONTENT_MAX) ?? "";
-        const childTexts: Array<{ tag: string; text: string }> = [];
-
-        for (let i = 0; i < Math.min(el.children.length, limit); i++) {
-            const text = el.children[i].textContent?.trim();
-            if (text) childTexts.push({ tag: el.children[i].tagName.toLowerCase(), text: text.slice(0, LIMITS.REACT.CHILD_TEXT_SLICE) });
-        }
-
-        return { found: true, selector, textLength: textContent.length, text: textContent.slice(0, LIMITS.REACT.TEXT_PREVIEW), childTexts: childTexts.slice(0, LIMITS.REACT.CHILD_TEXTS_MAX) };
-    }
-
     if (action === "path") {
         const parts: string[] = [];
         let current: Element | null = el;
@@ -353,20 +189,12 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
             const tag = current.tagName.toLowerCase();
             let part = tag;
 
-            if (current.id) {
-                part += `#${current.id}`;
-            } else if (current.classList[0]) {
-                part += `.${current.classList[0]}`;
-            } else {
-                const parent = current.parentElement;
-                if (parent) {
-                    let nth = 1;
-                    for (const sibling of parent.children) {
-                        if (sibling === current) break;
-                        if (sibling.tagName === current.tagName) nth++;
-                    }
-                    if (parent.querySelectorAll(`:scope > ${tag}`).length > 1) part += `:nth-of-type(${nth})`;
-                }
+            if (current.id) part += `#${current.id}`;
+            else if (current.classList[0]) part += `.${current.classList[0]}`;
+            else if (current.parentElement && current.parentElement.querySelectorAll(`:scope > ${tag}`).length > 1) {
+                let nth = 1;
+                for (let s = current.previousElementSibling; s; s = s.previousElementSibling) if (s.tagName === current.tagName) nth++;
+                part += `:nth-of-type(${nth})`;
             }
 
             parts.unshift(part);
@@ -378,44 +206,53 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
 
     const fiber = u.getFiber(el);
 
+    if (action === "source") {
+        if (!fiber) return fiberMiss(false, "No fiber found");
+        const stack: Array<{ name: string | null; moduleId: string; exportKey: string; hint: string | null }> = [];
+        const seen = new Set<string>();
+        for (const { fiber: f } of u.fibersUp(fiber, maxDepth)) {
+            const type = f.type as unknown;
+            if (!type || (typeof type !== "object" && typeof type !== "function")) continue;
+            const inner = u.innerType(type as { type?: unknown; render?: unknown });
+            const hit = u.lookupIdentity(inner) ?? u.lookupIdentity(type);
+            if (hit && !seen.has(`${hit.id}:${hit.key}`)) {
+                seen.add(`${hit.id}:${hit.key}`);
+                stack.push({ name: u.getComponentInfo(f).name, moduleId: hit.id, exportKey: hit.key, hint: u.getModuleHint(hit.id) });
+                if (stack.length >= limit) break;
+            }
+        }
+        if (!stack.length) return { found: true, selector, hasFiber: true, stack: [], message: "No ancestor fiber resolved to a webpack module (component may be inline/anonymous)" };
+        const nearest = stack[0];
+        const patchedBy = u.getModulePatchedBy(nearest.moduleId);
+        return { found: true, selector, nearest: { ...nearest, patchedBy: patchedBy.length ? patchedBy : undefined }, stack };
+    }
+
     if (action === "fiber") {
-        if (!fiber) return { found: true, selector, hasFiber: false, message: "No fiber found" };
+        if (!fiber) return fiberMiss(false, "No fiber found");
         if (direction !== "up" && direction !== "down") return { error: true, message: `Invalid direction "${direction}"` };
 
         const nodes: FiberNode[] = [];
+        const buildNode = (f: ReactFiber, depth: number): FiberNode => {
+            const info = u.getComponentInfo(f);
+            const node: FiberNode = { tagType: info.tagType, depth };
+            if (info.name) node.name = info.name;
+            else if (info.isMinified) node.minified = true;
+            if (includeProps && f.memoizedProps) {
+                node.propKeys = Object.keys(f.memoizedProps).filter(k => k.length > 1).slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW);
+            }
+            if (f.memoizedState) node.hasState = true;
+            return node;
+        };
 
         if (direction === "up") {
-            let current: ReactFiber | null = fiber;
-            let depth = 0;
-            while (current && depth < maxDepth) {
-                const info = u.getComponentInfo(current);
-                const node: FiberNode = { tagType: info.tagType, depth };
-                if (info.name) node.name = info.name;
-                else if (info.isMinified) node.minified = true;
-                if (includeProps && current.memoizedProps) {
-                    node.propKeys = Object.keys(current.memoizedProps)
-                        .filter(k => k.length > 1)
-                        .slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW);
-                }
-                if (current.memoizedState) node.hasState = true;
-                nodes.push(node);
-                current = current.return ?? null;
-                depth++;
+            for (const { fiber: f, depth } of u.fibersUp(fiber, maxDepth)) {
+                if (nodes.length >= limit) break;
+                nodes.push(buildNode(f, depth));
             }
         } else {
             const walkDown = (f: ReactFiber, d: number) => {
                 if (d > maxDepth || nodes.length >= limit) return;
-                const info = u.getComponentInfo(f);
-                const node: FiberNode = { tagType: info.tagType, depth: d };
-                if (info.name) node.name = info.name;
-                else if (info.isMinified) node.minified = true;
-                if (includeProps && f.memoizedProps) {
-                    node.propKeys = Object.keys(f.memoizedProps)
-                        .filter(k => k.length > 1)
-                        .slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW);
-                }
-                if (f.memoizedState) node.hasState = true;
-                nodes.push(node);
+                nodes.push(buildNode(f, d));
                 if (f.child) walkDown(f.child, d + 1);
                 if (f.sibling) walkDown(f.sibling, d);
             };
@@ -426,104 +263,74 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
     }
 
     if (action === "props") {
-        if (!fiber) return { found: true, selector, hasFiber: false, props: null, message: "No fiber found" };
+        if (!fiber) return fiberMiss(false, "No fiber found", { props: null });
 
         const targetFiber = walkFiberUp(
             fiber,
             maxDepth,
             f => !!f.memoizedProps && Object.keys(f.memoizedProps).length > 0 && (!!u.getComponentName(f) || Object.keys(f.memoizedProps).some(k => k.length > 2)),
         );
-        if (!targetFiber) return { found: true, selector, hasFiber: true, props: null, message: "No component with props found" };
+        if (!targetFiber) return fiberMiss(true, "No component with props found", { props: null });
 
-        const props: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(targetFiber.memoizedProps ?? {})) {
-            props[k] = u.serializeValue(v);
-        }
+        const props = Object.fromEntries(Object.entries(targetFiber.memoizedProps ?? {}).map(([k, v]) => [k, u.serializeValue(v)]));
 
         return { found: true, selector, componentName: u.getComponentName(targetFiber), props };
     }
 
     if (action === "hooks") {
-        if (!fiber) return { found: true, selector, hasFiber: false, hooks: null, message: "No fiber found" };
+        if (!fiber) return fiberMiss(false, "No fiber found", { hooks: null });
 
         const targetFiber = walkFiberUp(fiber, maxDepth, f => f.tag === 0 && !!f.memoizedState);
-        if (!targetFiber) return { found: true, selector, hasFiber: true, hooks: null, message: "No hooks found" };
+        if (!targetFiber) return fiberMiss(true, "No hooks found", { hooks: null });
 
         const hooks: HookInfo[] = [];
-        let hookState = targetFiber.memoizedState as FiberMemoizedState | null;
-        let i = 0;
-
-        while (hookState && i < LIMITS.REACT.MAX_HOOKS) {
-            const hookType = u.getHookType(hookState);
-            const hook: HookInfo = { index: i, type: hookType };
+        for (let hs = targetFiber.memoizedState; hs && hooks.length < LIMITS.REACT.MAX_HOOKS; hs = hs.next ?? null) {
+            const hookType = u.getHookType(hs);
+            const hook: HookInfo = { index: hooks.length, type: hookType };
 
             if (hookType === "useState" || hookType === "useReducer") {
-                hook.value = u.serializeValue(hookState.memoizedState);
+                hook.value = u.serializeValue(hs.memoizedState);
             } else if (hookType === "useRef") {
-                hook.value = u.serializeValue((hookState.memoizedState as { current?: unknown })?.current);
+                hook.value = u.serializeValue((hs.memoizedState as { current?: unknown })?.current);
             } else if (hookType === "useMemo") {
-                const memoState = hookState.memoizedState as unknown[];
-                hook.value = u.serializeValue(memoState?.[0]);
-                hook.deps = (hookState.deps as unknown[] | null)?.length ?? 0;
-            } else if (hookType === "useCallback") {
-                hook.deps = (hookState.deps as unknown[] | null)?.length ?? 0;
-            } else if (hookType.includes("Effect")) {
-                hook.deps = (hookState.deps as unknown[] | null)?.length ?? 0;
+                hook.value = u.serializeValue((hs.memoizedState as unknown[])?.[0]);
+                hook.deps = hs.deps?.length ?? 0;
+            } else if (hookType === "useCallback" || hookType.includes("Effect")) {
+                hook.deps = hs.deps?.length ?? 0;
             }
 
             hooks.push(hook);
-            hookState = hookState.next ?? null;
-            i++;
         }
 
         return { found: true, selector, componentName: u.getComponentName(targetFiber), hookCount: hooks.length, hooks };
     }
 
     if (action === "contexts") {
-        if (!fiber) return { found: true, selector, hasFiber: false, contexts: [], message: "No fiber found" };
+        if (!fiber) return fiberMiss(false, "No fiber found", { contexts: [] });
 
         const contexts: Array<{ displayName: string | null; valueKeys: string[] | null; sample: Record<string, unknown> }> = [];
-        let current: ReactFiber | null = fiber;
-        let depth = 0;
 
-        while (current && depth < maxDepth && contexts.length < limit) {
-            if (current.tag === 10) {
-                const contextType = current.type?._context ?? current.type;
-                const value = current.memoizedProps?.value;
-
-                if (value && typeof value === "object") {
-                    const keys = Object.keys(value);
-                    const sample: Record<string, unknown> = {};
-                    for (const k of keys.slice(0, LIMITS.REACT.CONTEXT_SAMPLE_KEYS)) sample[k] = u.serializeValue((value as Record<string, unknown>)[k]);
-
-                    contexts.push({ displayName: contextType?.displayName ?? null, valueKeys: keys.slice(0, LIMITS.REACT.CONTEXT_VALUE_KEYS), sample });
-                }
-            }
-            current = current.return ?? null;
-            depth++;
+        for (const { fiber: current } of u.fibersUp(fiber, maxDepth)) {
+            if (contexts.length >= limit) break;
+            if (current.tag !== FIBER_TAGS.CONTEXT_PROVIDER) continue;
+            const value = current.memoizedProps?.value;
+            if (!value || typeof value !== "object") continue;
+            const keys = Object.keys(value);
+            contexts.push({
+                displayName: (current.type?._context ?? current.type)?.displayName ?? null,
+                valueKeys: keys.slice(0, LIMITS.REACT.CONTEXT_VALUE_KEYS),
+                sample: Object.fromEntries(keys.slice(0, LIMITS.REACT.CONTEXT_SAMPLE_KEYS).map(k => [k, u.serializeValue((value as Record<string, unknown>)[k])])),
+            });
         }
 
         return { found: true, selector, contextCount: contexts.length, contexts, note: !contexts.length ? "No contexts found" : undefined };
     }
 
-    if (action === "forceUpdate") {
-        if (!fiber) return { found: true, selector, success: false, message: "No fiber found" };
-
-        const targetFiber = walkFiberUp(fiber, maxDepth, f => (f.tag === 1 && !!f.stateNode?.forceUpdate) || (f.tag === 0 && !!(f.memoizedState as FiberMemoizedState | null)?.queue?.dispatch));
-
-        if (!targetFiber) return { found: true, selector, success: false, message: "No updatable component found" };
-
-        if (targetFiber.tag === 1) targetFiber.stateNode!.forceUpdate!();
-        else (targetFiber.memoizedState as FiberMemoizedState).queue!.dispatch!({});
-
-        return { found: true, selector, success: true, component: u.getComponentName(targetFiber), message: "Component re-rendered" };
-    }
-
     if (action === "state") {
-        if (!fiber) return { found: true, selector, hasFiber: false, state: null, message: "No fiber found" };
+        if (!fiber) return fiberMiss(false, "No fiber found", { state: null });
 
         const targetFiber = walkFiberUp(fiber, maxDepth, f => (f.tag === 1 && !!f.stateNode?.state) || (f.tag === 0 && !!f.memoizedState));
-        if (!targetFiber) return { found: true, selector, hasFiber: true, state: null, message: "No stateful component found" };
+        if (!targetFiber) return fiberMiss(true, "No stateful component found", { state: null });
 
         const info = u.getComponentInfo(targetFiber);
 
@@ -532,41 +339,11 @@ export async function handleReactTool(args: ReactToolArgs): Promise<ToolResult> 
         }
 
         const stateValues: unknown[] = [];
-        let hookState = targetFiber.memoizedState as FiberMemoizedState | null;
-
-        while (hookState && stateValues.length < LIMITS.REACT.STATE_VALUES_MAX) {
-            if (hookState.queue?.dispatch) stateValues.push(u.serializeValue(hookState.memoizedState));
-            hookState = hookState.next ?? null;
+        for (let hs = targetFiber.memoizedState; hs && stateValues.length < LIMITS.REACT.STATE_VALUES_MAX; hs = hs.next ?? null) {
+            if (hs.queue?.dispatch) stateValues.push(u.serializeValue(hs.memoizedState));
         }
 
         return { found: true, selector, componentName: info.name, tagType: info.tagType, stateType: "hooks", stateCount: stateValues.length, state: stateValues };
-    }
-
-    if (action === "owner") {
-        if (!fiber) return { found: true, selector, hasFiber: false, owners: [], message: "No fiber found" };
-
-        const owners: Array<{ name: string | null; tagType: string; depth: number; propKeys?: string[] }> = [];
-        let current: ReactFiber | null = fiber._debugOwner ?? fiber.return ?? null;
-        let depth = 0;
-
-        while (current && depth < maxDepth && owners.length < limit) {
-            const info = u.getComponentInfo(current);
-
-            if (info.tagType !== "DOM" && info.tagType !== "Text") {
-                const entry: { name: string | null; tagType: string; depth: number; propKeys?: string[] } = { name: info.name, tagType: info.tagType, depth };
-                if (includeProps && current.memoizedProps) {
-                    entry.propKeys = Object.keys(current.memoizedProps)
-                        .filter(k => k !== "children" && k.length > 1)
-                        .slice(0, LIMITS.REACT.MAX_PROP_KEYS_PREVIEW);
-                }
-                owners.push(entry);
-            }
-
-            current = current._debugOwner ?? current.return ?? null;
-            depth++;
-        }
-
-        return { found: true, selector, ownerCount: owners.length, owners, note: !owners.length ? "No owners found" : undefined };
     }
 
     return { error: true, message: `Unknown action "${action}"` };

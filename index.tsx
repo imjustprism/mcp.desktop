@@ -1,80 +1,37 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 import { definePluginSettings } from "@api/Settings";
 import { Devs } from "@utils/constants";
 import { isObject } from "@utils/misc";
 import definePlugin, { OptionType, PluginNative, ReporterTestable } from "@utils/types";
 import { Toasts } from "@webpack/common";
 
+import { getToolTimeout } from "./timeouts";
 import {
     cleanupAllIntercepts,
     cleanupAllModuleWatches,
     cleanupAllTraces,
-    clearComponentIndexCache,
     clearCSSIndexCache,
-    getAdaptiveTimeout,
-    handleDiscordTool,
-    handleFluxTool,
-    handleInterceptTool,
-    handleIntlTool,
-    handleModuleTool,
-    handlePatchTool,
-    handlePluginTool,
-    handleReactTool,
-    handleSearchTool,
-    handleStoreTool,
-    handleTestPatchTool,
-    handleTraceTool,
+    errMsg,
     mcpLogger as logger,
     serializeResult,
-    TOOLS,
+    toStructuredContent,
     withTimeout,
 } from "./tools/index";
-import { CacheEntry, InitializeParams, IPCMCPRequest, MCPRequest, MCPResponse, SessionStats, ToolCallParams, ToolCallResult } from "./types";
+import { cacheTtlOf, HANDLERS, isCacheable, TOOLS } from "./tools/registry";
+import { CacheEntry, InitializeParams, MCPRequest, MCPResponse, SessionStats, ToolCallParams, ToolCallResult } from "./types";
 
 const Native = VencordNative.pluginHelpers.mcp as PluginNative<typeof import("./native")>;
 
 const toolCache = new Map<string, CacheEntry>();
-const TOOL_NAMES = new Set(TOOLS.map(t => t.name));
-const TOOL_CACHE_TTLS: Readonly<Record<string, number>> = {
-    store: 120000,
-    module: 30000,
-    search: 30000,
-    intl: 60000,
-    flux: 60000,
-    plugin: 30000,
-};
-const DEFAULT_CACHE_TTL = 10000;
 const MAX_CACHE_ENTRIES = 300;
+const SLOW_TOOL_THRESHOLD_MS = 5000;
+const POLL_BACKOFF = { IDLE_FEW: 5, IDLE_MANY: 20, DELAY_FAST_MS: 2, DELAY_MED_MS: 5, DELAY_SLOW_MS: 10 } as const;
 
 function getCacheKey(tool: string, args: Record<string, unknown>): string {
     return `${tool}:${JSON.stringify(args)}`;
 }
 
-const NON_CACHEABLE_TOOLS = new Set(["reloadDiscord", "evaluateCode"]);
-const NON_CACHEABLE_ACTIONS: Readonly<Record<string, Set<string>>> = {
-    react: new Set(["modify", "forceUpdate", "state"]),
-    flux: new Set(["dispatch"]),
-    discord: new Set(["api"]),
-    store: new Set(["call", "state", "snapshot"]),
-    plugin: new Set(["toggle", "enable", "disable", "setSetting"]),
-    module: new Set(["loadLazy", "watch", "watchGet", "watchStop", "diff", "annotate", "extract"]),
-    trace: new Set(["start", "get", "stop", "store"]),
-    intercept: new Set(["set", "get", "stop"]),
-};
-
-function isCacheable(tool: string, args: Record<string, unknown>): boolean {
-    if (NON_CACHEABLE_TOOLS.has(tool)) return false;
-    const actions = NON_CACHEABLE_ACTIONS[tool];
-    return !actions?.has(args.action as string);
-}
-
-function getCachedResult(tool: string, args: Record<string, unknown>): unknown | null {
-    if (!isCacheable(tool, args)) return null;
+function getCachedResult(tool: string, args: Record<string, unknown>): unknown {
+    if (!isCacheable(tool, actionOf(args))) return null;
     const key = getCacheKey(tool, args);
     const entry = toolCache.get(key);
     if (!entry) return null;
@@ -88,15 +45,14 @@ function getCachedResult(tool: string, args: Record<string, unknown>): unknown |
 }
 
 function setCachedResult(tool: string, args: Record<string, unknown>, result: unknown): void {
-    if (!isCacheable(tool, args)) return;
+    if (!isCacheable(tool, actionOf(args))) return;
     if (isObject(result) && "error" in result) return;
     const key = getCacheKey(tool, args);
-    const ttl = TOOL_CACHE_TTLS[tool] ?? DEFAULT_CACHE_TTL;
     if (toolCache.size >= MAX_CACHE_ENTRIES) {
         const firstKey = toolCache.keys().next().value;
         if (firstKey) toolCache.delete(firstKey);
     }
-    toolCache.set(key, { result, expiresAt: Date.now() + ttl });
+    toolCache.set(key, { result, expiresAt: Date.now() + cacheTtlOf(tool) });
 }
 
 const settings = definePluginSettings({
@@ -107,60 +63,48 @@ const settings = definePluginSettings({
     },
 });
 
-type ToolHandler = (args: any) => Promise<unknown> | unknown;
+function objectResult(obj: unknown, isError?: boolean): ToolCallResult {
+    return { content: [{ type: "text", text: serializeResult(obj) }], structuredContent: toStructuredContent(obj), isError };
+}
 
-const TOOL_HANDLERS: Record<string, ToolHandler> = {
-    module: handleModuleTool,
-    store: handleStoreTool,
-    intl: handleIntlTool,
-    flux: handleFluxTool,
-    patch: handlePatchTool,
-    react: handleReactTool,
-    discord: handleDiscordTool,
-    plugin: handlePluginTool,
-    search: handleSearchTool,
-    testPatch: handleTestPatchTool,
-    trace: handleTraceTool,
-    intercept: handleInterceptTool,
-    evaluateCode: (args: { code?: string }) => {
-        if (!args.code) return { error: true, message: "code required" };
-        return (0, eval)(args.code);
-    },
-    reloadDiscord: () => {
-        Native.notifyReloadTriggered();
-        setTimeout(() => location.reload(), 100);
-        return { reloading: true, message: "Discord is reloading. The next request will automatically wait for Discord to be ready." };
-    },
-};
+function toast(message: string, type: string): void {
+    Toasts.show({ id: Toasts.genId(), message, type });
+}
 
 async function executeToolCall(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
     const cached = getCachedResult(name, args);
     if (cached !== null) {
-        return { content: [{ type: "text", text: serializeResult({ ...(cached as object), cached: true }) }] };
+        return objectResult({ ...(cached as object), cached: true });
     }
 
-    const handler = TOOL_HANDLERS[name];
-    if (!handler) return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+    const handler = HANDLERS.get(name);
+    if (!handler) return errorResult({ message: `Unknown tool: ${name}` });
 
     try {
         const result = await handler(args);
         if (result == null) {
-            return { content: [{ type: "text", text: JSON.stringify({ warning: `${name} returned no result`, args }) }] };
+            return objectResult({ warning: `${name} returned no result`, args });
         }
         setCachedResult(name, args, result);
         const text = serializeResult(result);
         if (!text || text === "null" || text === "undefined") {
-            return { content: [{ type: "text", text: JSON.stringify({ warning: `${name} produced empty output`, args }) }] };
+            return objectResult({ warning: `${name} produced empty output`, args });
         }
-        return { content: [{ type: "text", text }] };
+        return { content: [{ type: "text", text }], structuredContent: toStructuredContent(result) };
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return { content: [{ type: "text", text: JSON.stringify({ error: true, message, tool: name, args }) }], isError: true };
+        const message = errMsg(error);
+        return errorResult({ message, tool: name, args });
     }
 }
 
-const PROTOCOL_VERSION = "2024-11-05";
-const SERVER_INFO = { name: "equicord-mcp", version: "1.0.0" };
+const LATEST_PROTOCOL = "2025-06-18";
+const SUPPORTED_PROTOCOLS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
+const SERVER_INFO = { name: "equicord-mcp", title: "Equicord Webpack Introspection", version: "1.0.0" };
+const INSTRUCTIONS =
+    "Tools for building Discord (Vencord/Equicord) plugins: search webpack modules by props/code/pattern, " +
+    "read and annotate module source, validate patches (testPatch/patch) before writing them, resolve intl " +
+    "#{intl::KEY} hashes, and inspect the live React/Flux/store runtime. Results carry both a text block and " +
+    "structuredContent. Start with module.find / search / discord.context, then module.suggest + testPatch to author a patch.";
 
 const sessionStats: SessionStats = {
     initialized: false,
@@ -170,6 +114,11 @@ const sessionStats: SessionStats = {
     toolCalls: 0,
     errors: 0,
 };
+
+const rpcResult = (id: MCPResponse["id"], result: unknown): MCPResponse => ({ jsonrpc: "2.0", id, result });
+const rpcError = (id: MCPResponse["id"], code: number, message: string): MCPResponse => ({ jsonrpc: "2.0", id, error: { code, message } });
+const errorResult = (fields: Record<string, unknown>): ToolCallResult => objectResult({ error: true, ...fields }, true);
+const actionOf = (args?: Record<string, unknown>): string | undefined => args?.action as string | undefined;
 
 async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null> {
     const { id } = request;
@@ -187,19 +136,14 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
 
             logger.info(`Client: ${sessionStats.clientInfo}, protocol: ${clientProtocol ?? "?"}`);
 
-            if (clientProtocol && clientProtocol !== PROTOCOL_VERSION) {
-                logger.warn(`Protocol mismatch: client=${clientProtocol}, server=${PROTOCOL_VERSION}`);
-            }
+            const negotiated = clientProtocol && SUPPORTED_PROTOCOLS.has(clientProtocol) ? clientProtocol : LATEST_PROTOCOL;
 
-            return {
-                jsonrpc: "2.0",
-                id,
-                result: {
-                    protocolVersion: PROTOCOL_VERSION,
-                    capabilities: { tools: { listChanged: false } },
-                    serverInfo: SERVER_INFO,
-                },
-            };
+            return rpcResult(id, {
+                protocolVersion: negotiated,
+                capabilities: { tools: { listChanged: false } },
+                serverInfo: SERVER_INFO,
+                instructions: INSTRUCTIONS,
+            });
         }
 
         case "notifications/initialized":
@@ -208,13 +152,13 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
             return null;
 
         case "ping":
-            return { jsonrpc: "2.0", id, result: {} };
+            return rpcResult(id, {});
 
         case "notifications/cancelled":
             return null;
 
         case "tools/list":
-            return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+            return rpcResult(id, { tools: TOOLS });
 
         case "tools/call": {
             sessionStats.toolCalls++;
@@ -223,30 +167,26 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
             if (!params?.name) {
                 sessionStats.errors++;
                 logger.error("tools/call: missing tool name");
-                return { jsonrpc: "2.0", id, error: { code: -32602, message: "Missing tool name" } };
+                return rpcError(id, -32602, "Missing tool name");
             }
 
-            if (!TOOL_NAMES.has(params.name)) {
+            if (!HANDLERS.has(params.name)) {
                 sessionStats.errors++;
                 logger.error(`Unknown tool: ${params.name}`);
-                return { jsonrpc: "2.0", id, error: { code: -32602, message: `Unknown tool: ${params.name}` } };
+                return rpcError(id, -32602, `Unknown tool: ${params.name}`);
             }
 
             const start = performance.now();
-            const action = params.arguments?.action as string | undefined;
+            const action = actionOf(params.arguments);
             const toolLabel = action ? `${params.name}.${action}` : params.name;
             let toolResult: ToolCallResult;
             try {
-                const timeout = getAdaptiveTimeout(params.name, params.arguments);
+                const timeout = getToolTimeout(params.name, action);
                 toolResult = await withTimeout(executeToolCall(params.name, params.arguments ?? {}), timeout, params.name);
             } catch (e) {
-                sessionStats.errors++;
-                const errorMsg = e instanceof Error ? e.message : String(e);
+                const errorMsg = errMsg(e);
                 logger.error(`${toolLabel}: ${errorMsg}`);
-                toolResult = {
-                    content: [{ type: "text", text: JSON.stringify({ error: true, message: errorMsg, tool: params.name, action: action ?? null }) }],
-                    isError: true,
-                };
+                toolResult = errorResult({ message: errorMsg, tool: params.name, action: action ?? null });
             }
 
             const elapsed = performance.now() - start;
@@ -254,26 +194,26 @@ async function handleMCPRequest(request: MCPRequest): Promise<MCPResponse | null
             if (toolResult.isError) {
                 sessionStats.errors++;
                 logger.error(`${toolLabel} failed (${elapsed.toFixed(0)}ms)`);
-            } else if (elapsed > 5000) {
+            } else if (elapsed > SLOW_TOOL_THRESHOLD_MS) {
                 logger.warn(`${toolLabel} slow (${elapsed.toFixed(0)}ms)`);
             } else if (settings.store.logRequests) {
                 logger.info(`${toolLabel} ${elapsed.toFixed(0)}ms`);
             }
 
-            return { jsonrpc: "2.0", id, result: toolResult };
+            return rpcResult(id, toolResult);
         }
 
         case "resources/list":
-            return { jsonrpc: "2.0", id, result: { resources: [] } };
+            return rpcResult(id, { resources: [] });
 
         case "prompts/list":
-            return { jsonrpc: "2.0", id, result: { prompts: [] } };
+            return rpcResult(id, { prompts: [] });
 
         default:
             if (request.method.startsWith("notifications/")) return null;
             sessionStats.errors++;
             logger.warn(`Unknown method: ${request.method}`);
-            return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${request.method}` } };
+            return rpcError(id, -32601, `Method not found: ${request.method}`);
     }
 }
 
@@ -305,21 +245,21 @@ export default definePlugin({
                 msg += ` | reqs:${s.requests} ok:${s.success} err:${s.errors} timeouts:${s.timeouts}`;
                 if (s.uptimeFormatted) msg += ` | up:${s.uptimeFormatted}`;
             }
-            Toasts.show({ id: Toasts.genId(), message: msg, type: status.running ? Toasts.Type.SUCCESS : Toasts.Type.FAILURE });
+            toast(msg, status.running ? Toasts.Type.SUCCESS : Toasts.Type.FAILURE);
             logger.info(`Status: ${msg}`);
         },
         async "Restart Server"() {
             logger.info("Restarting server...");
             await Native.stopServer();
             const result = await Native.startServer();
-            Toasts.show({ id: Toasts.genId(), message: result.ok ? "MCP restarted" : "Restart failed", type: result.ok ? Toasts.Type.SUCCESS : Toasts.Type.FAILURE });
+            toast(result.ok ? "MCP restarted" : "Restart failed", result.ok ? Toasts.Type.SUCCESS : Toasts.Type.FAILURE);
         },
         "Session Info"() {
             const uptime = sessionStats.connectedAt ? Math.floor((Date.now() - sessionStats.connectedAt) / 1000) : 0;
             const msg = sessionStats.initialized
                 ? `${sessionStats.clientInfo} | reqs:${sessionStats.requests} tools:${sessionStats.toolCalls} errs:${sessionStats.errors} | ${uptime}s`
                 : "No active session";
-            Toasts.show({ id: Toasts.genId(), message: msg, type: sessionStats.initialized ? Toasts.Type.SUCCESS : Toasts.Type.MESSAGE });
+            toast(msg, sessionStats.initialized ? Toasts.Type.SUCCESS : Toasts.Type.MESSAGE);
             logger.info(`Session: ${msg}`);
         },
     },
@@ -344,14 +284,14 @@ export default definePlugin({
         const pending = await Native.getNextRequest();
         if (pending) {
             this.idleCount = 0;
-            const { id, request } = pending as IPCMCPRequest;
+            const { id, request } = pending;
             handleMCPRequest(request)
-                .catch(e => ({ jsonrpc: "2.0" as const, id: request.id, error: { code: -32603, message: e instanceof Error ? e.message : String(e) } }))
+                .catch(e => rpcError(request.id, -32603, errMsg(e)))
                 .then(response => Native.sendResponse(id, response));
             this.scheduleImmediate();
         } else {
             this.idleCount++;
-            const delay = this.idleCount < 5 ? 2 : this.idleCount < 20 ? 5 : 10;
+            const delay = this.idleCount < POLL_BACKOFF.IDLE_FEW ? POLL_BACKOFF.DELAY_FAST_MS : this.idleCount < POLL_BACKOFF.IDLE_MANY ? POLL_BACKOFF.DELAY_MED_MS : POLL_BACKOFF.DELAY_SLOW_MS;
             this.pollTimeout = setTimeout(() => this.poll(), delay);
         }
     },
@@ -387,7 +327,6 @@ export default definePlugin({
         cleanupAllTraces();
         cleanupAllIntercepts();
         cleanupAllModuleWatches();
-        clearComponentIndexCache();
         clearCSSIndexCache();
         toolCache.clear();
         Native.stopServer();

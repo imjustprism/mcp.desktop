@@ -1,18 +1,13 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
+import type { PluginSettingDef } from "@utils/types";
 
-import type { PluginOptionsItem } from "@utils/types";
-
-export type JSONPrimitive = string | number | boolean | null;
-export type JSONObject = { [key: string]: JSONValue };
+type JSONPrimitive = string | number | boolean | null;
+type JSONObject = { [key: string]: JSONValue };
 export type JSONValue = JSONPrimitive | JSONValue[] | JSONObject;
+type AnyFn = (...args: unknown[]) => unknown;
 
-export type JSONSchemaType = "string" | "number" | "integer" | "boolean" | "array" | "object" | "null";
+type JSONSchemaType = "string" | "number" | "integer" | "boolean" | "array" | "object" | "null";
 
-export interface JSONSchemaProperty {
+interface JSONSchemaProperty {
     type: JSONSchemaType;
     description?: string;
     default?: JSONValue;
@@ -22,42 +17,38 @@ export interface JSONSchemaProperty {
     required?: string[];
 }
 
-export interface JSONSchema {
+interface JSONSchema {
     type: "object";
     properties: Record<string, JSONSchemaProperty>;
     required?: string[];
 }
 
-interface MCPBase {
+export interface MCPRequest {
     jsonrpc: "2.0";
-    id: number | string | null;
-}
-
-export interface MCPRequest extends MCPBase {
     id: number | string;
     method: string;
     params?: Record<string, JSONValue>;
 }
 
-export interface MCPError {
-    code: number;
-    message: string;
-    data?: JSONValue;
-}
-
-export interface MCPResponse extends MCPBase {
+export interface MCPResponse {
+    jsonrpc: "2.0";
+    id: number | string | null;
     result?: unknown;
-    error?: MCPError;
+    error?: { code: number; message: string; data?: JSONValue };
 }
 
 export interface MCPTool {
     name: string;
+    title?: string;
     description: string;
     inputSchema: JSONSchema;
+    outputSchema?: JSONSchema;
+    annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
 }
 
 export interface ToolCallResult {
     content: [{ type: "text"; text: string }];
+    structuredContent?: Record<string, unknown>;
     isError?: boolean;
 }
 
@@ -66,55 +57,45 @@ export interface IPCMCPRequest {
     request: MCPRequest;
 }
 
-interface Timestamped {
+export interface TraceCapture {
     ts: number;
-}
-
-interface ExpiringResource {
-    id: number;
-    maxCaptures: number;
-    startedAt: number;
-    expiresAt: number;
-}
-
-interface FilterableResource {
-    filter: RegExp | null;
-}
-
-export interface TraceCapture extends Timestamped {
     type: string;
     data?: Record<string, unknown>;
 }
 
-export interface ActiveTrace extends ExpiringResource, FilterableResource {
+interface TimedCapture {
+    id: number;
+    maxCaptures: number;
+    startedAt: number;
+    expiresAt: number;
+    filter: RegExp | null;
+}
+
+export interface ActiveTrace extends TimedCapture {
     captures: TraceCapture[];
     unsub: (() => void) | null;
     isStoreTrace?: boolean;
 }
 
-export interface WatchedModule extends Timestamped {
-    id: string;
-    size: number;
-}
-
-export interface ModuleWatch extends ExpiringResource, FilterableResource {
-    newModules: WatchedModule[];
+export interface ModuleWatch extends TimedCapture {
+    newModules: { ts: number; id: string; size: number; }[];
     baselineCount: number;
     listener: ((factory: unknown) => void) | null;
 }
 
-export interface InterceptCapture extends Timestamped {
+export interface InterceptCapture {
+    ts: number;
     args: unknown[];
     result?: unknown;
     error?: string;
 }
 
-export interface FunctionIntercept extends Omit<ExpiringResource, "startedAt"> {
+export interface FunctionIntercept extends Pick<TimedCapture, "id" | "maxCaptures" | "expiresAt"> {
     moduleId: string;
     exportKey: string;
     methodKey?: string;
     methodParent?: Record<string, unknown>;
-    original: (...args: unknown[]) => unknown;
+    original: AnyFn;
     captures: InterceptCapture[];
 }
 
@@ -123,12 +104,9 @@ export interface CacheEntry {
     expiresAt: number;
 }
 
-interface BaseStats {
+export interface ServerStats {
     requests: number;
     errors: number;
-}
-
-export interface ServerStats extends BaseStats {
     startedAt: number;
     success: number;
     timeouts: number;
@@ -137,7 +115,9 @@ export interface ServerStats extends BaseStats {
     uptimeFormatted?: string | null;
 }
 
-export interface SessionStats extends BaseStats {
+export interface SessionStats {
+    requests: number;
+    errors: number;
     initialized: boolean;
     clientInfo: string | null;
     connectedAt: number;
@@ -156,7 +136,7 @@ export interface BatchResult {
     scannedTo: number;
 }
 
-type WebpackExportValue = string | number | boolean | null | undefined | object | ((...args: unknown[]) => unknown);
+type WebpackExportValue = JSONPrimitive | undefined | object | AnyFn;
 
 export interface WebpackExport {
     displayName?: string;
@@ -170,42 +150,33 @@ export interface WebpackModule {
     loaded?: boolean;
 }
 
-export type WebpackModuleFactory = (module: WebpackModule, exports: WebpackExport, require: WebpackRequire) => void;
-
-export interface WebpackRequire {
-    m: Record<string, WebpackModuleFactory>;
-    c: Record<string, WebpackModule>;
-}
-
-export type FluxActionHandler = (event: FluxAction) => void;
-export type FluxInterceptor = (action: FluxAction) => boolean;
+type FluxActionHandler = (event: FluxAction) => void;
+type FluxInterceptor = (action: FluxAction) => boolean;
 
 export interface FluxAction {
     type: string;
     [key: string]: JSONValue | undefined;
 }
 
-interface FluxHandlerBase {
+interface FluxHandlerNode<H> {
     name?: string;
-    actionHandler?: Record<string, FluxActionHandler> | FluxActionHandler;
+    band?: number;
+    actionHandler?: H;
     storeDidChange?: () => void;
 }
 
-export interface FluxDependencyNode extends FluxHandlerBase {
-    actionHandler?: Record<string, FluxActionHandler>;
-}
+type FluxDependencyNode = FluxHandlerNode<Record<string, FluxActionHandler>>;
+type FluxOrderedHandler = FluxHandlerNode<FluxActionHandler>;
 
-export interface FluxOrderedHandler extends FluxHandlerBase {
-    actionHandler?: FluxActionHandler;
-}
-
-export interface FluxDependencyGraph {
-    nodes?: Record<string, FluxDependencyNode>;
-}
-
-export interface FluxActionHandlers {
-    _dependencyGraph?: FluxDependencyGraph;
+interface FluxActionHandlers {
+    _dependencyGraph?: {
+        nodes?: Record<string, FluxDependencyNode>;
+        outgoingEdges?: Record<string, string[]>;
+        incomingEdges?: Record<string, string[]>;
+        circular?: Record<string, string[]>;
+    };
     _orderedActionHandlers?: Record<string, FluxOrderedHandler[]>;
+    getOrderedActionHandlers?: (action: { type: string }) => FluxOrderedHandler[];
 }
 
 export interface FluxDispatcherInternal {
@@ -222,50 +193,22 @@ export interface DiscordAPIError {
     body?: { code?: number; message?: string };
 }
 
-export type HTTPMethod = "get" | "post" | "patch" | "put" | "del";
+type HTTPMethod = "get" | "post" | "patch" | "put" | "del";
 
-export interface GatewaySocket {
-    connectionState_: string;
-    sessionId: string | null;
-    seq: number;
-    heartbeatInterval: number;
-    heartbeatAck: boolean;
-    lastHeartbeatTime: number;
-    lastHeartbeatAckTime: number;
-    connectionStartTime: number;
-    identifyCount: number;
-    resumeUrl: string | null;
-}
-
-interface DisplayNameable {
+interface FiberType {
     displayName?: string;
-}
-
-export interface FiberType extends DisplayNameable {
     name?: string;
-    render?: DisplayNameable;
-    WrappedComponent?: DisplayNameable;
-    _context?: DisplayNameable;
+    render?: { displayName?: string };
+    WrappedComponent?: { displayName?: string };
+    _context?: { displayName?: string };
 }
 
-export type FiberTag = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27;
-
-export type FiberProps = Record<string, JSONValue | React.ReactNode | ((...args: unknown[]) => unknown)>;
-
-export interface FiberStateNode {
-    state?: Record<string, JSONValue>;
-    forceUpdate?: () => void;
-}
-
-export interface FiberStateQueue {
-    dispatch?: (action: JSONValue) => void;
-    lastRenderedReducer?: { name?: string };
-}
+type FiberProps = Record<string, JSONValue | React.ReactNode | AnyFn>;
 
 export interface FiberMemoizedState {
     tag?: number;
     create?: () => void | (() => void);
-    queue?: FiberStateQueue;
+    queue?: { dispatch?: (action: JSONValue) => void; lastRenderedReducer?: { name?: string }; };
     memoizedState?: JSONValue | React.ReactNode;
     next?: FiberMemoizedState | null;
     deps?: ReadonlyArray<JSONValue> | null;
@@ -273,12 +216,12 @@ export interface FiberMemoizedState {
 }
 
 export interface ReactFiber {
-    tag: FiberTag;
+    tag: number;
     type?: FiberType;
     key: string | null;
     memoizedState?: FiberMemoizedState | null;
     memoizedProps?: FiberProps | null;
-    stateNode?: FiberStateNode | null;
+    stateNode?: { state?: Record<string, JSONValue>; forceUpdate?: () => void; } | null;
     return?: ReactFiber | null;
     child?: ReactFiber | null;
     sibling?: ReactFiber | null;
@@ -318,7 +261,7 @@ export interface HookInfo {
     deps?: number;
 }
 
-export type ReplaceFn = (match: string, ...groups: string[]) => string;
+type ReplaceFn = (match: string, ...groups: string[]) => string;
 
 export interface PluginReplacement {
     match?: string | RegExp;
@@ -346,13 +289,14 @@ export interface PluginSettings {
     [key: string]: unknown;
 }
 
-export type PluginOption = PluginOptionsItem;
+export type PluginOption = PluginSettingDef;
 
 export interface VencordPlugin {
     started?: boolean;
     required?: boolean;
     patches?: PluginPatch[];
     options?: Record<string, PluginOption>;
+    settings?: { def?: Record<string, PluginOption>; store?: Record<string, unknown> };
 }
 
 export interface ToolError {
@@ -363,35 +307,14 @@ export interface ToolError {
 
 export type ToolResult<T = Record<string, unknown>> = T | ToolError;
 
-type ModuleAction =
-    | "find"
-    | "extract"
-    | "exports"
-    | "context"
-    | "diff"
-    | "deps"
-    | "whereUsed"
-    | "functionAt"
-    | "structure"
-    | "size"
-    | "ids"
-    | "patchedList"
-    | "findFactory"
-    | "stats"
-    | "loadLazy"
-    | "watch"
-    | "watchGet"
-    | "watchStop"
-    | "suggest"
-    | "annotate"
-    | "css"
-    | "components";
-type StoreAction = "find" | "list" | "state" | "call" | "subscriptions" | "methods" | "snapshot";
-type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "bruteforce" | "test" | "unknown" | "neighbors" | "clearCache";
-type FluxToolAction = "events" | "types" | "dispatch" | "listeners";
-type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "benchmark" | "compare" | "slowscan" | "conflicts" | "diff" | "broken";
+type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "functionAt" | "structure" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate" | "css" | "explain";
+type StoreAction = "find" | "list" | "state" | "call" | "snapshot" | "links";
+type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "clearCache";
+type FluxToolAction = "events" | "dispatch" | "listeners" | "graph" | "producers" | "chain";
+type GraphAction = "imports" | "importedBy" | "path" | "neighborhood" | "exports";
+type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "conflicts" | "diff" | "broken";
 
-export type FinderType = "byProps" | "byCode" | "store" | "componentByCode" | "exportedComponent" | "cssClasses" | "byClassNames";
+type FinderType = "byProps" | "byCode" | "store" | "componentByCode" | "exportedComponent" | "cssClasses" | "byClassNames";
 
 export interface FinderSpec {
     type: FinderType;
@@ -399,42 +322,28 @@ export interface FinderSpec {
     plugin?: string;
 }
 
-export interface FinderResult {
-    type: FinderType;
-    args: string[];
-    plugin?: string;
+export interface FinderResult extends FinderSpec {
     found: boolean;
     exportType?: string;
     error?: string;
 }
-type ReactAction = "query" | "styles" | "modify" | "tree" | "text" | "path" | "fiber" | "props" | "hooks" | "contexts" | "find" | "forceUpdate" | "state" | "owner" | "root";
-type DiscordAction =
-    | "context"
-    | "api"
-    | "snowflake"
-    | "endpoints"
-    | "common"
-    | "enum"
-    | "memory"
-    | "performance"
-    | "gateway"
-    | "waitForIpc"
-    | "constants"
-    | "experiments"
-    | "platform"
-    | "tokens"
-    | "icons"
-    | "buildInfo";
-type TraceAction = "events" | "handlers" | "storeEvents" | "start" | "get" | "stop" | "store";
+type ReactAction = "query" | "styles" | "tree" | "path" | "fiber" | "props" | "hooks" | "contexts" | "find" | "state" | "source";
+type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "constants" | "tokens";
+type TraceAction = "start" | "get" | "stop" | "store";
 type InterceptAction = "set" | "get" | "stop";
 type PluginAction = "list" | "enable" | "disable" | "toggle" | "settings" | "setSetting";
 
-interface BaseToolArgs {
+interface ToolArgsBase<A> {
+    action?: A;
     limit?: number;
 }
 
-export interface ModuleToolArgs extends BaseToolArgs {
-    action?: ModuleAction;
+interface CaptureWindowArgs {
+    duration?: number;
+    maxCaptures?: number;
+}
+
+export interface ModuleToolArgs extends ToolArgsBase<ModuleAction>, CaptureWindowArgs {
     id?: string;
     props?: string[];
     code?: string[];
@@ -448,46 +357,43 @@ export interface ModuleToolArgs extends BaseToolArgs {
     all?: boolean;
     maxLength?: number;
     chars?: number;
-    duration?: number;
-    maxCaptures?: number;
     filter?: string;
     watchId?: number;
 }
 
-export interface StoreToolArgs extends BaseToolArgs {
-    action?: StoreAction;
+export interface StoreToolArgs extends ToolArgsBase<StoreAction> {
     name?: string;
     method?: string;
     args?: unknown[];
-    depth?: number;
-    includeTypes?: boolean;
 }
 
-export interface IntlToolArgs extends BaseToolArgs {
-    action?: IntlAction;
+export interface IntlToolArgs extends ToolArgsBase<IntlAction> {
     key?: string;
     hash?: string;
-    hashes?: string[];
     query?: string;
     moduleId?: string;
-    candidates?: string[];
-    prefixes?: string[];
-    suffixes?: string[];
-    mids?: string[];
-    pattern?: string;
-    parts?: Record<string, string[]>;
 }
 
-export interface FluxToolArgs extends BaseToolArgs {
-    action?: FluxToolAction;
+export interface FluxToolArgs extends ToolArgsBase<FluxToolAction> {
     event?: string;
     type?: string;
+    store?: string;
     payload?: Record<string, unknown>;
     filter?: string;
 }
 
-export interface PatchToolArgs extends BaseToolArgs {
-    action?: PatchAction;
+export interface GraphToolArgs extends ToolArgsBase<GraphAction> {
+    id?: string;
+    to?: string;
+    depth?: number;
+}
+
+export interface ResolveToolArgs {
+    landmark?: string;
+    limit?: number;
+}
+
+export interface PatchToolArgs extends ToolArgsBase<PatchAction> {
     find?: string;
     match?: string;
     replace?: string;
@@ -498,23 +404,12 @@ export interface PatchToolArgs extends BaseToolArgs {
     showMultiMatch?: boolean;
     showValid?: boolean;
     finders?: FinderSpec[];
-    iterations?: number;
-    rounds?: number;
-    matchA?: string;
-    matchB?: string;
-    replaceA?: string;
-    replaceB?: string;
 }
 
-export interface ReactToolArgs extends BaseToolArgs {
-    action?: ReactAction;
+export interface ReactToolArgs extends ToolArgsBase<ReactAction> {
     selector?: string;
     componentName?: string;
     properties?: string[];
-    styles?: Record<string, string>;
-    addClass?: string;
-    removeClass?: string;
-    setAttribute?: Record<string, string>;
     includeText?: boolean;
     includeByProps?: boolean;
     depth?: number;
@@ -531,42 +426,29 @@ export interface DiscordToolArgs {
     id?: string;
     filter?: string;
     memberName?: string;
-    timeout?: number;
 }
 
-export interface TraceToolArgs extends BaseToolArgs {
-    action?: TraceAction;
+export interface TraceToolArgs extends ToolArgsBase<TraceAction>, CaptureWindowArgs {
     id?: number;
     filter?: string;
-    event?: string;
     store?: string;
-    duration?: number;
-    maxCaptures?: number;
 }
 
-export interface InterceptToolArgs {
+export interface InterceptToolArgs extends CaptureWindowArgs {
     action?: InterceptAction;
     id?: number;
     moduleId?: string;
     exportKey?: string;
-    duration?: number;
-    maxCaptures?: number;
 }
 
-export interface SearchToolArgs extends BaseToolArgs {
+export interface SearchToolArgs {
+    limit?: number;
     pattern?: string;
     patterns?: string[];
     regex?: boolean;
 }
 
-export interface TestPatchToolArgs {
-    find?: string;
-    match?: string;
-    replace?: string;
-    benchmark?: boolean;
-    iterations?: number;
-    rounds?: number;
-}
+export type TestPatchToolArgs = Pick<PatchToolArgs, "find" | "match" | "replace">;
 
 export interface PluginToolArgs {
     action?: PluginAction;
@@ -576,25 +458,6 @@ export interface PluginToolArgs {
     setting?: string;
     value?: unknown;
 }
-
-export interface EvaluateCodeArgs {
-    code?: string;
-}
-
-export type ToolArgs =
-    | ModuleToolArgs
-    | StoreToolArgs
-    | IntlToolArgs
-    | FluxToolArgs
-    | PatchToolArgs
-    | ReactToolArgs
-    | DiscordToolArgs
-    | TraceToolArgs
-    | InterceptToolArgs
-    | SearchToolArgs
-    | TestPatchToolArgs
-    | PluginToolArgs
-    | EvaluateCodeArgs;
 
 export interface InitializeParams {
     protocolVersion?: string;
@@ -634,42 +497,9 @@ export interface CSSIndexCache {
     builtAt: number;
 }
 
-export interface StoryControl {
-    type: string;
-    label?: string;
-    defaultValue?: unknown;
-    options?: unknown[];
-}
-
-export interface StoryEntry {
-    moduleId: string;
-    title: string;
-    name: string;
-    id: string;
-    docs?: string;
-    controls: Record<string, StoryControl>;
-}
-
-export interface ComponentIndex {
-    stories: StoryEntry[];
-    manaTypes: Map<string, string[]>;
-    displayNames: Map<string, Array<{ moduleId: string; key: string }>>;
-    uiBarrelId: string | null;
-    iconsModuleId: string | null;
-    uiBarrelStats: { components: number; icons: number; enums: number };
-    builtAt: number;
-}
-
 export interface FindModuleMatch {
     id: string;
     snippet: string;
-}
-
-export interface CompEntry {
-    key: string;
-    displayName?: string;
-    props?: Array<{ name: string; default?: string }>;
-    manaType?: string;
 }
 
 export interface SuggestCandidate {
@@ -678,7 +508,6 @@ export interface SuggestCandidate {
     unique: boolean;
     moduleCount: number;
     intlKey?: string;
-    unstable?: boolean;
 }
 
 export interface AnchorCandidate {
@@ -686,7 +515,6 @@ export interface AnchorCandidate {
     search: string;
     type: string;
     index: number;
-    intlKey?: string;
 }
 
 export interface ModuleMatch {
@@ -717,54 +545,15 @@ export interface MatchDiagnostic {
 
 export interface SnowflakeUtilsType {
     extractTimestamp(snowflake: string): number;
-    fromTimestamp(timestamp: number): string;
-    compare(a: string, b: string): number;
-    age(snowflake: string): number;
-    atPreviousMillisecond(snowflake: string): string;
-    atNextMillisecond(snowflake: string): string;
     isProbablyAValidSnowflake(value: string): boolean;
 }
 
-export interface PlatformUtils {
-    PlatformTypes: Record<string, string>;
-    isDesktop(): boolean;
-    isWeb(): boolean;
-    isAndroid(): boolean;
-    isIOS(): boolean;
-    isLinux(): boolean;
-    isMac(): boolean;
-    isWindows(): boolean;
-    getPlatform(): string;
-    getPlatformName(): string;
-    getOS(): string;
-    isPlatformEmbedded(): boolean;
-}
-
-export interface DesignTokenColor {
+interface DesignTokenColor {
     css: string;
     resolve(ctx: { theme: string }): Record<string, unknown>;
 }
 
-export interface DesignTokens {
+export interface DesignTokens extends Record<"shadows" | "radii" | "spacing" | "modules" | "themes", Record<string, unknown>> {
     colors: Record<string, DesignTokenColor>;
     unsafe_rawColors: Record<string, DesignTokenColor>;
-    shadows: Record<string, unknown>;
-    radii: Record<string, unknown>;
-    spacing: Record<string, unknown>;
-    modules: Record<string, unknown>;
-    themes: Record<string, unknown>;
-    layout?: Record<string, unknown>;
-    space?: Record<string, unknown>;
-}
-
-export interface PatternData {
-    starters: string[];
-    transitions: Map<string, string[]>;
-    parts: string[];
-    prefixes: string[];
-    prefixes2: string[];
-    prefixes3: string[];
-    suffixes: string[];
-    suffixes2: string[];
-    suffixes3: string[];
 }

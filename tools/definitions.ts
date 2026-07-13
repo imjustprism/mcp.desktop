@@ -1,22 +1,16 @@
-/*
- * Vencord, a Discord client mod
- * Copyright (c) 2026 Vendicated and contributors
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
 import { MCPTool } from "../types";
 
 export const TOOLS: MCPTool[] = [
     {
         name: "module",
         description:
-            "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: source. exports: list. context: code around pattern. diff: patched vs original. deps/whereUsed: dependencies. functionAt: full function at pattern. structure: outline without source. size: bytes. ids: list. patchedList: patched modules+plugins. findFactory: search raw factory. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track new modules. suggest: find patch anchors. annotate: intl-resolved source. css: class index. components: UI components+props.",
+            "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: source. exports: list. context: code around pattern. diff: patched vs original. functionAt: full function at pattern. structure: outline without source. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track newly-registered modules. suggest: find patch anchors. annotate: intl-resolved source. css: CSS class index/lookup. explain: one-call dossier (role, real exports, imports, importedBy count, patchedBy, intl/store/dispatch fingerprint).",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["find", "extract", "exports", "context", "diff", "deps", "whereUsed", "functionAt", "structure", "size", "ids", "patchedList", "findFactory", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "annotate", "css", "components"],
+                    enum: ["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "annotate", "css", "explain"],
                 },
                 id: { type: "string", description: "Module ID" },
                 props: { type: "array", items: { type: "string" }, description: "Find by export props" },
@@ -41,63 +35,55 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "store",
-        description: "Flux stores. Auto-resolves 'User'→'UserStore'. list: names. find: methods/getters/props. methods: prototype chain. state/call: get value/invoke. subscriptions: handled events. snapshot: all getters.",
+        description: "Flux stores. Auto-resolves 'User' to 'UserStore'. list: names. find: methods/getters/props (method filters the listing). state/call: get value/invoke. snapshot: all getters (size-budgeted). links: syncsWith + subscriber counts + dispatch token.",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["find", "list", "state", "call", "subscriptions", "methods", "snapshot"] },
+                action: { type: "string", enum: ["find", "list", "state", "call", "snapshot", "links"] },
                 name: { type: "string", description: "Store name (auto-resolves)" },
-                method: { type: "string", description: "Method/getter for state/call" },
+                method: { type: "string", description: "Method/getter for state/call. Also filters the find listing" },
                 args: { type: "array", items: { type: "string" }, description: "Args for call" },
-                depth: { type: "number", default: 2 },
-                includeTypes: { type: "boolean", default: false },
             },
         },
     },
     {
         name: "intl",
-        description: "Intl system. hash: key→hash. reverse: hash→key. search: by message text. scan: hashes in module. targets: modules using key. bruteforce: crack hash(es). test: try candidates against hash(es). unknown: uncracked hashes. neighbors: surrounding keys. clearCache: reset cache. Use #{intl::KEY} in patches.",
+        description: "Intl system. hash: key to hash. reverse: hash to key. search: find hashes by message text. scan: hashes in a module. targets: modules using a key. clearCache: reset the hash to key cache. Use #{intl::KEY} in patches.",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["hash", "reverse", "search", "scan", "targets", "bruteforce", "test", "unknown", "neighbors", "clearCache"] },
+                action: { type: "string", enum: ["hash", "reverse", "search", "scan", "targets", "clearCache"] },
                 key: { type: "string", description: "Intl key (e.g. MESSAGE_EDITED)" },
                 hash: { type: "string", description: "6-char hash" },
-                hashes: { type: "array", items: { type: "string" }, description: "Multiple hashes for test" },
                 query: { type: "string", description: "Search text" },
                 moduleId: { type: "string", description: "Module ID for scan" },
                 limit: { type: "number", default: 20 },
-                candidates: { type: "array", items: { type: "string" }, description: "Keys to test" },
-                prefixes: { type: "array", items: { type: "string" }, description: "Prefixes to combine" },
-                suffixes: { type: "array", items: { type: "string" }, description: "Suffixes to combine" },
-                mids: { type: "array", items: { type: "string" }, description: "Middle parts to combine" },
-                pattern: { type: "string", description: "Template with {PLACEHOLDERS}" },
-                parts: { type: "object", description: "Placeholder values: {PREFIX: ['USER','GUILD']}" },
             },
         },
     },
     {
         name: "flux",
-        description: "Flux dispatcher. events/types: list. listeners: stores for event. dispatch: send action.",
+        description: "Flux dispatcher + store data-flow graph. events: list action types. listeners: stores handling an event. dispatch: send action. graph: a store's dispatch band, handled actions, and dependsOn/dependents in the store DAG. producers: modules that dispatch a given action type. chain: the full ordered store-handler chain for an action type (topological fan-out with bands).",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["events", "types", "dispatch", "listeners"] },
-                event: { type: "string", description: "Event name" },
-                type: { type: "string", description: "Action type for dispatch" },
+                action: { type: "string", enum: ["events", "dispatch", "listeners", "graph", "producers", "chain"] },
+                event: { type: "string", description: "Event name (for listeners)" },
+                type: { type: "string", description: "Action type (for dispatch/producers)" },
+                store: { type: "string", description: "Store name (for graph)" },
                 payload: { type: "object", description: "Dispatch payload" },
                 filter: { type: "string", description: "Case-insensitive filter" },
-                limit: { type: "number", default: 100, description: "Max events/handlers returned" },
+                limit: { type: "number", default: 100, description: "Max events/handlers/dependents returned" },
             },
         },
     },
     {
         name: "patch",
-        description: "Patch validation. unique: find matches 1 module. analyze: scan for broken patches. plugin: patches+health. lint: pattern quality. finds: validate webpack finders. benchmark: time patches. compare: A/B test. slowscan: rank by speed. conflicts: multi-plugin modules. diff: patch changes. broken: unconsumed patches.",
+        description: "Patch validation. unique: find matches 1 module. analyze: scan all plugins for broken patches. plugin: one plugin's patches+health. lint: pattern quality score. finds: validate webpack finders. conflicts: modules patched by multiple plugins. diff: patches targeting a module. broken: unconsumed patches.",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["unique", "analyze", "plugin", "lint", "finds", "benchmark", "compare", "slowscan", "conflicts", "diff", "broken"] },
+                action: { type: "string", enum: ["unique", "analyze", "plugin", "lint", "finds", "conflicts", "diff", "broken"] },
                 find: { type: "string", description: "Find string (supports #{intl::KEY})" },
                 match: { type: "string", description: "/regex/flags (\\i for minified vars)" },
                 replace: { type: "string", description: "Replacement" },
@@ -121,29 +107,19 @@ export const TOOLS: MCPTool[] = [
                         required: ["type", "args"],
                     },
                 },
-                iterations: { type: "number", default: 10000 },
-                rounds: { type: "number", default: 3 },
-                matchA: { type: "string" },
-                matchB: { type: "string" },
-                replaceA: { type: "string" },
-                replaceB: { type: "string" },
             },
         },
     },
     {
         name: "react",
-        description: "React/DOM inspection. query: find elements. fiber: component tree (up/down). props/state/hooks: component data. contexts: providers. find: by name/props. styles: computed CSS. tree: DOM subtree. modify: set styles/classes. text: content. path: selector. forceUpdate: re-render. owner: parent components. root: fiber stats.",
+        description: "React/DOM inspection. query: find elements. fiber: component tree (up/down). props/state/hooks: component data. contexts: providers. find: by name/props. styles: computed CSS. tree: DOM subtree. path: selector. source: bridge an on-screen element to its webpack module(s), export name, hint, and patchedBy. This is the pixel-to-source link for patch authoring.",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["query", "styles", "modify", "tree", "text", "path", "fiber", "props", "hooks", "contexts", "find", "forceUpdate", "state", "owner", "root"] },
+                action: { type: "string", enum: ["query", "styles", "tree", "path", "fiber", "props", "hooks", "contexts", "find", "state", "source"] },
                 selector: { type: "string", description: "CSS selector" },
                 componentName: { type: "string", description: "Component/prop name (partial)" },
                 properties: { type: "array", items: { type: "string" }, description: "CSS properties for styles" },
-                styles: { type: "object", description: "CSS for modify" },
-                addClass: { type: "string" },
-                removeClass: { type: "string" },
-                setAttribute: { type: "object" },
                 includeText: { type: "boolean", default: false },
                 includeByProps: { type: "boolean", default: true },
                 limit: { type: "number", default: 20 },
@@ -156,18 +132,17 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "discord",
-        description: "Discord context/utils. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: API routes. common: Webpack.Common. enum: find by member. memory/performance: stats. gateway: websocket. waitForIpc: await ready. constants: Discord constants. experiments: A/B flags. platform: OS/build. tokens: design tokens. icons: URL builders. buildInfo: build number/hash.",
+        description: "Discord context/utils. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: API routes. common: Webpack.Common exports. enum: find module by member. constants: Discord constants. tokens: design tokens.",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["context", "api", "snowflake", "endpoints", "common", "enum", "memory", "performance", "gateway", "waitForIpc", "constants", "experiments", "platform", "tokens", "icons", "buildInfo"] },
+                action: { type: "string", enum: ["context", "api", "snowflake", "endpoints", "common", "enum", "constants", "tokens"] },
                 method: { type: "string", enum: ["get", "post", "patch", "put", "del"] },
                 endpoint: { type: "string", description: "API endpoint" },
                 body: { type: "object" },
                 id: { type: "string", description: "Snowflake ID" },
                 filter: { type: "string", description: "Filter string" },
                 memberName: { type: "string", description: "Enum member" },
-                timeout: { type: "number", default: 10000 },
             },
         },
     },
@@ -200,17 +175,39 @@ export const TOOLS: MCPTool[] = [
         },
     },
     {
+        name: "resolve",
+        description: "Feature GPS: resolve any Discord landmark to its owning module(s). Auto-detects the landmark type: intl hash (6 base64 chars), CSS class or 6-hex suffix, StoreName (displayName), SCREAMING_SNAKE (intl key, action type, or enum member), or literal string. Returns modules plus role hints. The one call for what owns an observable string, since minified names are dead.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                landmark: { type: "string", description: "intl hash, CSS class or suffix, StoreName, SCREAMING_SNAKE key/action/enum, or any literal" },
+                limit: { type: "number", default: 20 },
+            },
+        },
+    },
+    {
+        name: "graph",
+        description: "Module dependency graph (from require call-sites in factory source). imports: modules this one requires. importedBy: modules requiring this one. path: dependency path from id to `to`. neighborhood: local subgraph (nodes+edges). exports: real public export names (RealName to local), works even for unloaded modules.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                action: { type: "string", enum: ["imports", "importedBy", "path", "neighborhood", "exports"] },
+                id: { type: "string", description: "Module ID" },
+                to: { type: "string", description: "Target module ID (for path)" },
+                depth: { type: "number", description: "Max hops for path (default 12)" },
+                limit: { type: "number", default: 20 },
+            },
+        },
+    },
+    {
         name: "testPatch",
-        description: "Test patch before writing. Validates find uniqueness, match regex, captures, replacement preview. Shows anchors. Returns VALID/FIND_NOT_UNIQUE/MATCH_FAILED.",
+        description: "Test a patch before writing it. Validates find uniqueness, match regex, captures, replacement preview, and post-replace syntax. Shows nearby anchors. Returns PASS/FIND_NOT_UNIQUE/MATCH_FAILED.",
         inputSchema: {
             type: "object",
             properties: {
                 find: { type: "string", description: "Find string (supports #{intl::KEY})" },
                 match: { type: "string", description: "/regex/flags (\\i for minified)" },
                 replace: { type: "string", description: "Replacement preview" },
-                benchmark: { type: "boolean", default: false },
-                iterations: { type: "number", default: 10000 },
-                rounds: { type: "number", default: 3 },
             },
             required: ["find", "match"],
         },
@@ -228,18 +225,16 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "trace",
-        description: "Flux tracing. events: list. handlers: stores for event. storeEvents: events for store. start: capture actions. get: retrieve. stop: end+results. store: watch state changes. Auto-expires.",
+        description: "Flux action tracing. start: capture dispatched actions (optional regex filter). get: retrieve. stop: end+results. store: watch a store's state changes. Auto-expires. (For event/handler listing use the flux and store tools.)",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["events", "handlers", "storeEvents", "start", "get", "stop", "store"] },
-                filter: { type: "string", description: "Regex filter" },
-                event: { type: "string" },
+                action: { type: "string", enum: ["start", "get", "stop", "store"] },
+                filter: { type: "string", description: "Regex filter on action type (for start)" },
                 id: { type: "number", description: "Trace ID" },
-                store: { type: "string", description: "Store name" },
+                store: { type: "string", description: "Store name (for store)" },
                 duration: { type: "number", description: "ms (1000-60000)", default: 10000 },
                 maxCaptures: { type: "number", default: 100 },
-                limit: { type: "number", default: 50 },
             },
         },
     },
