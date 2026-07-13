@@ -4,6 +4,8 @@ An MCP server that exposes the Discord desktop client's internals to an AI assis
 
 The main use case is writing and debugging Vencord and Equicord patches. Production Discord ships minified names, so the tools work from stable anchors instead: intl keys, CSS class suffixes, store display names, and the module dependency graph.
 
+> Full disclosure, this is certified Claude slop. An AI wrote most of it, a human mostly nodded along, and against all odds it works. You are holding freshly generated machine output. No refunds.
+
 ## Requirements
 
 - Discord desktop with Vencord or Equicord installed
