@@ -9,6 +9,7 @@ The main use case is writing and debugging Vencord and Equicord patches. Product
 ## Requirements
 
 - Discord desktop with Vencord or Equicord installed
+- A from-source Vencord or Equicord dev checkout. The build and inject commands below run from that repo root, not from this plugin folder
 - Node and pnpm to build
 - An MCP client that can reach a local HTTP endpoint
 
@@ -28,15 +29,22 @@ pnpm build --dev
 pnpm inject
 ```
 
-Enable the plugin in Discord settings, then restart Discord.
+Enable the mcp plugin in Discord settings, then restart Discord.
 
 ## Connect your AI client
 
 The plugin starts an MCP server on `http://127.0.0.1:8486` whenever Discord is open and the plugin is enabled. The server speaks JSON-RPC 2.0 over HTTP POST and binds to localhost only.
 
-Point your MCP client at that URL. For a client that only speaks stdio, put an HTTP bridge in front of it, for example `mcp-remote`.
+Point your MCP client at that URL. Every request POSTs to the root path. There is no separate route. The server advertises itself as `equicord-mcp`. For a client that only speaks stdio, put an HTTP bridge in front of it, for example `mcp-remote`.
 
-If the client does not see the server, start Discord first so the server is listening, then open the client session.
+Smoke-test that the server is up:
+
+```bash
+curl -s -X POST http://127.0.0.1:8486 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+If the client does not see the server, start Discord first so the server is listening, then open the client session. Confirm the "MCP on :8486" toast appears in Discord.
 
 ## Tools
 
@@ -73,10 +81,23 @@ Requests never leave the machine. The server binds to `127.0.0.1` and rejects an
 
 `skills/discord-modding/` bundles agent-facing docs for driving these tools: a `SKILL.md` quickstart plus reference files for the patch-authoring workflow, find generation, patch repair, the intl system, runtime introspection, module discovery, power combos, and a tables reference. Point an MCP client's skill loader at that directory.
 
+## Security
+
+The server has no authentication. Any process on your machine can reach `127.0.0.1:8486` and drive every tool. Some tools are powerful. `discord` `api` makes authenticated REST calls as your account, including writes and deletes. `flux` `dispatch` and `store` `call` mutate live client state. `evaluateCode` runs arbitrary JavaScript in the renderer. Tools can also read live account data such as your current user and DMs. Run this only on a machine you trust.
+
+## Troubleshooting
+
+- No connection. Start Discord first so the server is listening, then open the client. Confirm the "MCP on :8486" toast in Discord.
+- Port already in use. Something else holds 8486. The console logs `EADDRINUSE`. Close the other listener, or change the port in `native.ts`.
+- Stale answers. Read results are cached briefly (see Notes). Wait out the window or reload to force a fresh read.
+
 ## Notes
 
 - The server runs only while Discord is open. Reloading the renderer keeps the server alive. Changes to the main process require a full Discord restart.
 - Every tool response carries both a text block and structured content, so a client can read either form.
+- Successful read results are cached per tool for a short window, from 10 seconds up to 5 minutes for `graph`. A cache hit is tagged `cached: true`. Live-state calls can return data that old, so reload or wait out the window when you need the current value.
+- A find marked `unique` is unique only among the webpack factories loaded this session. It can still collide with a module in an unfetched lazy chunk. Run `module loadLazy` and re-check for screens you have not opened.
+- The plugin has one setting, `logRequests`, off by default. It logs each incoming call to the console.
 - The intl reverse map ships in `map/key_map.json`. Keys that are not in that map and are not referenced by name in loaded code cannot be reversed and stay as raw 6-character hashes. `intl recover` reconstructs many of these from live messages by hashing candidate key names and proving the match. Recovered keys are cached to disk and reload on the next start.
 
 ## License
