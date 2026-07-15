@@ -107,12 +107,12 @@ async function executeToolCall(name: string, args: Record<string, unknown>): Pro
 
 const LATEST_PROTOCOL = "2025-06-18";
 const SUPPORTED_PROTOCOLS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
-const SERVER_INFO = { name: "equicord-mcp", title: "Equicord Webpack Introspection", version: "1.0.0" };
+const SERVER_INFO = { name: "discord-mcp", title: "Discord Client Introspection", version: "1.0.0" };
 const INSTRUCTIONS =
-    "Tools for building Discord (Vencord/Equicord) plugins: search webpack modules by props/code/pattern, " +
-    "read and annotate module source, validate patches (testPatch/patch) before writing them, resolve intl " +
-    "#{intl::KEY} hashes, and inspect the live React/Flux/store runtime. Results carry both a text block and " +
-    "structuredContent. Start with module.find / search / discord.context, then module.suggest + testPatch to author a patch.";
+    "A Discord MCP server exposing the desktop client's internals to an AI client: webpack modules, Flux stores and dispatcher, the React tree, and the intl hash system. " +
+    "Search modules by props/code/pattern, read and annotate source, generate build-stable patch anchors, validate and repair patches (testPatch/patch) before writing them, resolve intl " +
+    "#{intl::KEY} hashes, and inspect the live React/Flux/store runtime. Results carry both a text block and structuredContent. " +
+    "Start with module.find / search / discord.context, then module.suggest + testPatch to author a patch.";
 
 const sessionStats: SessionStats = {
     initialized: false,
@@ -238,7 +238,7 @@ interface PluginInstance {
 
 export default definePlugin({
     name: "mcp",
-    description: "Exposes webpack internals via MCP",
+    description: "Discord MCP server that exposes the client's webpack, Flux, React, and intl internals to an AI client",
     authors: [Devs.prism],
     reporterTestable: ReporterTestable.None,
     settings,

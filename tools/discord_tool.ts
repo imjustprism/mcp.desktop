@@ -44,7 +44,7 @@ export async function handleDiscord(args: DiscordToolArgs): Promise<ToolResult> 
             apiVersion: env.API_VERSION ?? null,
             apiEndpoint: env.API_ENDPOINT ?? null,
             hostVersion: u.safeCall(() => native?.app?.getVersion?.() ?? null, null),
-            equicordVersion: VERSION,
+            modVersion: VERSION,
             userAgent: navigator.userAgent.slice(0, 160),
         };
     }

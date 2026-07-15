@@ -35,7 +35,7 @@ Enable the mcp plugin in Discord settings, then restart Discord.
 
 The plugin starts an MCP server on `http://127.0.0.1:8486` whenever Discord is open and the plugin is enabled. The server speaks JSON-RPC 2.0 over HTTP POST and binds to localhost only.
 
-Point your MCP client at that URL. Every request POSTs to the root path. There is no separate route. The server advertises itself as `equicord-mcp`. For a client that only speaks stdio, put an HTTP bridge in front of it, for example `mcp-remote`.
+Point your MCP client at that URL. Every request POSTs to the root path. There is no separate route. The server advertises itself as `discord-mcp`. For a client that only speaks stdio, put an HTTP bridge in front of it, for example `mcp-remote`.
 
 Smoke-test that the server is up:
 

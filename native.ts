@@ -273,7 +273,7 @@ export function stopServer(): { ok: boolean } {
 const KEYMAP_MAX_BYTES = 2_000_000;
 
 function keyMapPath(): string {
-    return join(app.getPath("userData"), "EquicordMcpKeyMap.json");
+    return join(app.getPath("userData"), "DiscordMcpKeyMap.json");
 }
 
 export async function readKeyMap(): Promise<string | null> {

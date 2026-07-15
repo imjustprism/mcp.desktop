@@ -140,7 +140,7 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "discord",
-        description: "Discord context/utils. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: API routes. common: Webpack.Common exports. enum: find module by member. constants: Discord constants. tokens: design tokens. buildInfo: release channel/build id/version hash/host+Equicord versions. experiments: registered experiment descriptors (filterable).",
+        description: "Discord context/utils. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: API routes. common: Webpack.Common exports. enum: find module by member. constants: Discord constants. tokens: design tokens. buildInfo: release channel/build id/version hash/host+mod versions. experiments: registered experiment descriptors (filterable).",
         inputSchema: {
             type: "object",
             properties: {
