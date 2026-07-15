@@ -15,7 +15,7 @@ With options:
 ```
 
 - `id` (required): module ID.
-- `minScore` (default 8): minimum sequence score — length/entropy weight of the token run, NOT durability. Raise it to only get longer, more distinctive anchors.
+- `minScore` (default 8): minimum sequence score. Length/entropy weight of the token run, NOT durability. Raise it to get longer, more distinctive anchors.
 - `requireUnique` (default false): drop any find that matches more than one loaded module factory.
 - `limit` (default 20, max 200): max finds returned.
 
@@ -37,7 +37,7 @@ With options:
       "durability": 10,
       "unique": true,
       "moduleCount": 1,
-      "reason": "anchored on an intl key (#{intl::KEY}) — content-independent, stable per key name",
+      "reason": "anchored on an intl key (#{intl::KEY}), content-independent and stable per key name",
       "regex": false
     }
   ]
@@ -46,57 +46,57 @@ With options:
 
 Field meanings:
 
-- `find` — the literal string (or regex source when `regex: true`) to use as `find:` in a patch or `findByCode(...)` arg.
-- `type` — `"intl"` (synthesized `#{intl::KEY}` placeholder), `"sequence"` (contiguous token run from the source), `"pair"` (two runs joined by a bounded-gap regex; always `regex: true`).
-- `tier` / `durability` — see durability tiers below. `durability` is 0–10.
-- `score` — distinctiveness weight (token length × log entropy). Bigger = more content, less likely to collide. **`score` is the raw sequence weight, NOT the rank key** — genFinds ranks by durability, not score. A short intl find (low score) outranks a long weak sequence (high score). Don't sort candidates by `score` yourself.
-- `unique` / `moduleCount` — whether the find matched exactly one **loaded** factory, and how many it matched. `unique: true` with `moduleCount: 1` is what you want.
-- `reason` — the primary durability rationale/warning.
+- `find`: the literal string (or regex source when `regex: true`) to use as `find:` in a patch or `findByCode(...)` arg.
+- `type`: `"intl"` (synthesized `#{intl::KEY}` placeholder), `"sequence"` (contiguous token run from the source), `"pair"` (two runs joined by a bounded-gap regex, always `regex: true`).
+- `tier` / `durability`: see durability tiers below. `durability` is 0 to 10.
+- `score`: distinctiveness weight (token length × log entropy). Bigger = more content, less likely to collide. **`score` is the raw sequence weight, NOT the rank key.** genFinds ranks by durability, not score. A short intl find (low score) outranks a long weak sequence (high score). Don't sort candidates by `score` yourself.
+- `unique` / `moduleCount`: whether the find matched exactly one **loaded** factory, and how many it matched. `unique: true` with `moduleCount: 1` is what you want.
+- `reason`: the primary durability rationale/warning.
 
-Sorting: unique first, then durability desc, then score desc. Pick the top unique find; prefer `tier: "intl"` or `"storeName"` when available.
+Sorting: unique first, then durability desc, then score desc. Pick the top unique find. Prefer `tier: "intl"` or `"storeName"` when available.
 
 ## Durability tiers
 
-Scored by `scoreDurability` (0–10, base assigned by tier, then penalties subtracted):
+Scored by `scoreDurability` (0 to 10, base assigned by tier, then penalties subtracted):
 
 | Tier | Base score | Anchor | Why stable / fragile |
 |---|---|---|---|
-| `intl` | **10** | `#{intl::KEY}` placeholder | Content-independent: Equicord resolves the key to the current per-build hash at patch time. Survives copy edits and hash rotation; only breaks if Discord deletes/renames the key. |
+| `intl` | **10** | `#{intl::KEY}` placeholder | Content-independent: Equicord resolves the key to the current per-build hash at patch time. Survives copy edits and hash rotation. Only breaks if Discord deletes/renames the key. |
 | `intl` (raw) | 5 | raw 6-char intl hash (`.t.AbC123`) | The hash changes whenever the English copy changes. Always convert to `#{intl::KEY}` form instead. |
-| `storeName` | **8** | Flux store display-name literal (`"GuildMemberStore"`) | Store names are hand-written API surface, referenced across the codebase; essentially never renamed by minification or rebuilds. |
+| `storeName` | **8** | Flux store display-name literal (`"GuildMemberStore"`) | Store names are hand-written API surface, referenced across the codebase. Never renamed by minification or rebuilds. |
 
-Live `storeName` exemplar (TypingStore, verified): genFinds emits `find: ")}static displayName=\"TypingStore\";getTypingUsers("` — `tier: "storeName"`, `durability: 8`, `unique: true`. Note the anchor is the `static displayName="..."` literal, not just the bare name; genFinds bundles the surrounding structure so the run stays unique.
-| `errorString` | **7** | multi-word string literal ≥8 chars (error/log copy) | Developer-facing copy is not minified and rarely edited — but it CAN be reworded, unlike intl keys. |
+Live `storeName` exemplar (TypingStore, verified). genFinds emits `find: ")}static displayName=\"TypingStore\";getTypingUsers("` with `tier: "storeName"`, `durability: 8`, `unique: true`. The anchor is the `static displayName="..."` literal, not the bare name. genFinds bundles the surrounding structure so the run stays unique.
+| `errorString` | **7** | multi-word string literal ≥8 chars (error/log copy) | Developer-facing copy is not minified and rarely edited. But it CAN be reworded, unlike intl keys. |
 | `string` | **6** | short string literal (no whitespace) | Literals survive minification, but short single-word strings are more likely to appear in other modules and to be refactored. |
 | `method` | **6** | method name ≥5 chars (`.getChannel(`) | Public-ish method names survive minification (only local idents get mangled), but internal renames happen. |
 | `prop` | **5** | property name ≥4 chars (`autocomplete:`) | Property keys survive minification, but object shapes get reordered/restructured more freely than call sites. |
-| `weak` | 5 base, no anchor bonus | none | No intl key, store name, or distinctive string — pure structure/idents, expected to drift every build. |
+| `weak` | 5 base, no anchor bonus | none | No intl key, store name, or distinctive string. Pure structure/idents, drifts every build. |
 
 ## Volatility penalties
 
 Subtracted from the tier base (never applied to `#{intl::KEY}` finds):
 
-- **Multi-digit numbers** (3+ digits): −2 each, capped at −4. These are usually module/chunk ids, which are reassigned on every build. (Skipped for `errorString` tier — numbers inside prose copy are fine.)
+- **Multi-digit numbers** (3+ digits): −2 each, capped at −4. These are usually module/chunk ids, reassigned on every build. (Skipped for `errorString` tier. Numbers inside prose copy are fine.)
 - **CSS hash suffix** (`name_ab12cd` shape): −3. The suffix after `_`/`-` is a per-build content hash. Match the logical prefix (`name_`) instead, or use `module.find` with `className`.
 - **16+ char hex hash**: −3. CDN asset / content hashes rotate whenever the asset or build changes.
-- **3+ one/two-char identifiers**: −2. Minified names are re-rolled every build — put `\i` in the patch `match`, never in the `find`.
-- **Plain-English copy** (weak/string tiers only): −1. Marketing/UI wording rots when Discord edits it; if an intl key exists for that copy, use it.
+- **3+ one/two-char identifiers**: −2. Minified names are re-rolled every build. Put `\i` in the patch `match`, never in the `find`.
+- **Plain-English copy** (weak/string tiers only): −1. Marketing/UI wording rots when Discord edits it. If an intl key exists for that copy, use it.
 - **Very short** (<8 chars excluding intl placeholders): −1. Higher risk of matching the wrong module after a rebuild.
 
-Rule of thumb: durability ≥8 is a "set and forget" find; 6–7 will occasionally break on copy edits; ≤5 should only ship if nothing better is unique — and then prefer a pair find.
+Rule of thumb: durability ≥8 is a "set and forget" find. 6 to 7 will occasionally break on copy edits. ≤5 should only ship if nothing better is unique, and then prefer a pair find.
 
 ## What genFinds excludes (and why)
 
-Candidates are token runs; a run is cut whenever it hits:
+Candidates are token runs. A run is cut whenever it hits:
 
-- **require/import spans** — `n(12345)`, `n.n(e)`, `n.t(123)`, `n.e("chunkId")`, `n.bind(n, 123)`, and whole `var a=n(123),b=n(456);` chains (the require param is auto-detected from the module header). Module ids inside these are reassigned every build, so any find containing them dies immediately.
-- **`webpackId: 123` spans** — same reason: raw module ids.
-- **identifiers ≤4 chars** — treated as minified; they are renamed per build, so a run breaks at each one. Only idents ≥5 chars survive into finds.
+- **require/import spans**: `n(12345)`, `n.n(e)`, `n.t(123)`, `n.e("chunkId")`, `n.bind(n, 123)`, and whole `var a=n(123),b=n(456);` chains (the require param is auto-detected from the module header). Module ids inside these are reassigned every build, so any find containing them dies immediately.
+- **`webpackId: 123` spans**: same reason, raw module ids.
+- **identifiers ≤4 chars**: treated as minified. Renamed per build, so a run breaks at each one. Only idents ≥5 chars survive into finds.
 - Lone punctuation / lone declaration keywords, runs with no content token (ident/string/template/regex), runs scoring below `minScore`, and finds over 400 chars.
 
-This is why generated finds sometimes look like disjoint fragments of the source — everything build-volatile has been carved out.
+This is why generated finds sometimes look like disjoint fragments of the source. Everything build-volatile has been carved out.
 
-**Aside — `module.structure` `keyStrings`:** if you use `module.structure` to eyeball anchors before genFinds, note its `keyStrings` array includes **bare numeric strings** (e.g. `"455629"`) that are webpack module ids pulled from require sites, not semantic anchors. Never lift those into a find — they're reassigned every build. genFinds already carves them out; trust its output over raw `keyStrings`.
+**Aside: `module.structure` `keyStrings`.** If you use `module.structure` to eyeball anchors before genFinds, its `keyStrings` array includes **bare numeric strings** (e.g. `"455629"`) that are webpack module ids pulled from require sites, not semantic anchors. Never lift those into a find. They're reassigned every build. genFinds already carves them out. Trust its output over raw `keyStrings`.
 
 ## Pair synthesis (`type: "pair"`)
 
@@ -106,14 +106,14 @@ When no single sequence is unique, the tool automatically synthesizes **pair fin
 getChannel\(this\.props[\s\S]{0,34}"MessageActionCreators"
 ```
 
-- Emitted as `regex: true` — use it as `find: /.../ ` (regex), not a plain string.
+- Emitted as `regex: true`. Use it as `find: /.../ ` (regex), not a plain string.
 - The gap bound is the observed gap + 10 chars of slack, so minor code shuffles between the anchors still match, but a gap explosion (real refactor) correctly fails.
-- Pair durability = `min(left, right) − 1`; the tier reported is the weaker fragment's tier.
-- Pairs only appear in output when no non-pair find was unique — you don't need to request them.
+- Pair durability = `min(left, right) − 1`. The tier reported is the weaker fragment's tier.
+- Pairs only appear in output when no non-pair find was unique. You don't need to request them.
 
-### Validating a pair (regex) find — do NOT use testPatch
+### Validating a pair (regex) find: do NOT use testPatch
 
-Pair finds are `regex: true`, and **the `testPatch` tool's `find` arg is a plain string that is treated literally** — it does not accept `/regex/` form (see `tools/definitions.ts`: `find: { type: "string" }`). Feed a pair find into `testPatch` and the regex source is searched as a literal string, hits zero modules, and you get verdict `FIND_NO_MATCH` even though the find is correct. Validate regex/pair finds with `module.find` `{pattern}` (or the `search` tool) instead — both accept `/regex/flags`:
+Pair finds are `regex: true`. **The `testPatch` tool's `find` arg is a plain string treated literally.** It does not accept `/regex/` form (see `tools/definitions.ts`: `find: { type: "string" }`). Feed a pair find into `testPatch` and the regex source is searched as a literal string, hits zero modules, and you get verdict `FIND_NO_MATCH` even though the find is correct. Validate regex/pair finds with `module.find` `{pattern}` (or the `search` tool) instead. Both accept `/regex/flags`:
 
 ```json
 { "tool": "module", "args": { "action": "find", "pattern": "getChannel\\(this\\.props[\\s\\S]{0,34}\"MessageActionCreators\"", "all": true } }
@@ -123,7 +123,7 @@ Confirm exactly one match, then ship the pair as the plugin's `find:`. Reserve `
 
 ## uniquenessScope caveat: loaded-factories only
 
-`unique` / `moduleCount` are computed against **currently loaded webpack factories** (`uniquenessScope: "loaded-factories"`) — this is confirmed live: `unique: true` means unique among loaded factories *only*. A find that genFinds reports as `"unique"` can still collide with a module inside a lazy chunk that hasn't been fetched yet — your patch would then apply to the wrong module (or both) once that chunk loads. `unique: true` is never a global guarantee.
+`unique` / `moduleCount` are computed against **currently loaded webpack factories** (`uniquenessScope: "loaded-factories"`). Confirmed live: `unique: true` means unique among loaded factories *only*. A find that genFinds reports as `"unique"` can still collide with a module inside a lazy chunk that hasn't been fetched yet. Your patch would then apply to the wrong module (or both) once that chunk loads. `unique: true` is never a global guarantee.
 
 For lazy-heavy surfaces (settings pages, modals, dev tools, activities, less-visited routes), force the chunks in first:
 
