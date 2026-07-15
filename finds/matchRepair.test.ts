@@ -6,7 +6,7 @@
 
 import assert from "node:assert";
 
-import { diagnoseMatch } from "./matchRepair";
+import { diagnoseMatch, literalRuns } from "./matchRepair";
 
 let passed = 0;
 function check(name: string, fn: () => void) {
@@ -218,6 +218,64 @@ check("A18: stripping refuses when the stripped pattern matches ambiguously (mul
 check("A19: a stale lookaround containing a capture group is NOT stripped (would shift $n refs)", () => {
     const r = diagnoseMatch("nowFoo", "(?<=(then))Foo");
     assert.notStrictEqual(r.status, "repaired");
+});
+
+check("L1: plain literal runs are emitted split on metacharacters", () => {
+    assert.deepStrictEqual(literalRuns("renderThumbnail", 4), ["renderThumbnail"]);
+    assert.deepStrictEqual(literalRuns("abcd.efgh", 4), ["abcd", "efgh"]);
+});
+
+check("L2: escaped metacharacters count as literal text", () => {
+    assert.deepStrictEqual(literalRuns("data\\-x\\.y", 4), ["data-x.y"]);
+    assert.deepStrictEqual(literalRuns("foo\\(bar\\)", 4), ["foo(bar)"]);
+});
+
+check("L3: character-class contents are not emitted as literals", () => {
+    assert.deepStrictEqual(literalRuns("[aeiou]word", 4), ["word"]);
+    assert.ok(!literalRuns("pre[abcd]post", 4).includes("abcd"));
+});
+
+check("L4: {n,m} quantifier bounds are not emitted as literals", () => {
+    assert.deepStrictEqual(literalRuns("alpha.{0,500}omega", 4), ["alpha", "omega"]);
+    const runs = literalRuns("token{12,34}next", 4);
+    assert.ok(!runs.includes("12,34") && !runs.includes("1234"));
+});
+
+check("L5: lookaround openers do not leak into literals", () => {
+    for (const run of literalRuns("(?<=then)value(?=Y)", 4)) {
+        assert.ok(!/[?=<]/.test(run), run);
+    }
+    assert.deepStrictEqual(literalRuns("(?=nope)target", 4), ["nope", "target"]);
+});
+
+check("L6: minLen threshold drops runs shorter than the bound", () => {
+    assert.deepStrictEqual(literalRuns("abcd", 5), []);
+    assert.deepStrictEqual(literalRuns("abcd", 4), ["abcd"]);
+    assert.deepStrictEqual(literalRuns("ab.cdef", 4), ["cdef"]);
+});
+
+check("R1: minified gap-too-narrow widens to reach the real span", () => {
+    const src = "var o=n.createElement(t,{className:a,onClick:s},children)";
+    const r = diagnoseMatch(src, "createElement\\(t,\\{className:a,.{0,2}\\}");
+    assert.strictEqual(r.status, "repaired");
+    assert.strictEqual(r.failureKind, "gap-too-narrow");
+    assert.ok(r.adjustedPattern && matches(r.adjustedPattern, src));
+});
+
+check("R2: minified stale lookbehind strips to a unique anchor", () => {
+    const src = "e.dispatch({type:UPDATE});return renderSidebar(e)";
+    const r = diagnoseMatch(src, "(?<=commit\\()renderSidebar");
+    assert.strictEqual(r.status, "repaired");
+    assert.strictEqual(r.failureKind, "lookaround-stale");
+    assert.strictEqual(r.adjustedPattern, "renderSidebar");
+});
+
+check("R3: minified structure change with present literals stays unrepaired", () => {
+    const src = "var s=this.state,c=s.count>0?1:0";
+    const r = diagnoseMatch(src, "s\\.count[<=]0");
+    assert.strictEqual(r.status, "unrepaired");
+    assert.strictEqual(r.failureKind, "structure-changed");
+    assert.strictEqual(r.missingLiterals.length, 0);
 });
 
 console.log(`\nall ${passed} checks passed`);

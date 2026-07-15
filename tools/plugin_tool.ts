@@ -13,6 +13,14 @@ function ensurePluginSettings(name: string) {
     return (pluginSettings[name] ??= {});
 }
 
+const REDACTED = "[redacted]";
+const SECRET_KEY_RE = /token|secret|password|passwd|api[_-]?key|\bauth(?!or)|email/i;
+
+function isSecretSetting(key: string, opt: PluginOption): boolean {
+    if (SECRET_KEY_RE.test(key)) return true;
+    return /password|token/i.test(OPTION_TYPE_NAMES[opt.type ?? 0] ?? "");
+}
+
 export async function handlePlugin(args: PluginToolArgs): Promise<ToolResult> {
     const { action, name, setting: settingKey, value: settingValue } = args;
     const showPatches = args.showPatches ?? false;
@@ -66,8 +74,16 @@ export async function handlePlugin(args: PluginToolArgs): Promise<ToolResult> {
 
         if (action === "settings") {
             const settingsInfo = Object.fromEntries(Object.entries(options).map(([key, opt]) => {
-                const o = opt as PluginOption & { description?: string; default?: unknown; options?: unknown };
-                return [key, { type: OPTION_TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN", description: o.description, currentValue: currentSettings[key] ?? o.default, default: o.default, options: o.options }];
+                const o = opt as PluginOption & { description?: string; default?: unknown; options?: unknown; restartNeeded?: boolean };
+                const secret = isSecretSetting(key, opt);
+                return [key, {
+                    type: OPTION_TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN",
+                    description: o.description,
+                    currentValue: secret ? REDACTED : (currentSettings[key] ?? o.default),
+                    default: secret ? REDACTED : o.default,
+                    options: o.options,
+                    restartNeeded: o.restartNeeded ?? false,
+                }];
             }));
 
             return { name: pluginName, enabled: plugin.started ?? false, settingsCount: Object.keys(options).length, settings: settingsInfo };
@@ -78,9 +94,21 @@ export async function handlePlugin(args: PluginToolArgs): Promise<ToolResult> {
             return { error: true, message: `Setting "${settingKey}" not found`, availableSettings: Object.keys(options) };
         }
 
+        const opt = options[settingKey];
+        const secret = isSecretSetting(settingKey, opt);
+        const restartNeeded = (opt as PluginOption & { restartNeeded?: boolean }).restartNeeded ?? false;
         const oldValue = currentSettings[settingKey];
         ensurePluginSettings(pluginName)[settingKey] = settingValue;
-        return { success: true, name: pluginName, setting: settingKey, oldValue, newValue: settingValue };
+        return {
+            success: true,
+            name: pluginName,
+            setting: settingKey,
+            type: OPTION_TYPE_NAMES[opt.type ?? 0] ?? "UNKNOWN",
+            oldValue: secret ? REDACTED : oldValue,
+            newValue: secret ? REDACTED : settingValue,
+            restartNeeded,
+            message: restartNeeded ? "Restart required" : undefined,
+        };
     }
 
     let pluginList = Object.entries(plugins);

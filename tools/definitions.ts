@@ -165,7 +165,7 @@ export const TOOLS: MCPTool[] = [
                 showPatches: { type: "boolean", default: false },
                 validate: { type: "boolean", description: "Check patch health", default: false },
                 setting: { type: "string", description: "Setting key" },
-                value: { type: "string", description: "New value" },
+                value: { description: "New value. Accepts any JSON value (string, number, boolean, array, object, null)" },
             },
         },
     },

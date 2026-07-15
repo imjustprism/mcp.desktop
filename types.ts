@@ -14,7 +14,7 @@ type AnyFn = (...args: unknown[]) => unknown;
 type JSONSchemaType = "string" | "number" | "integer" | "boolean" | "array" | "object" | "null";
 
 interface JSONSchemaProperty {
-    type: JSONSchemaType;
+    type?: JSONSchemaType;
     description?: string;
     default?: JSONValue;
     items?: JSONSchemaProperty;
@@ -473,7 +473,7 @@ export interface PluginToolArgs {
     showPatches?: boolean;
     validate?: boolean;
     setting?: string;
-    value?: unknown;
+    value?: JSONValue;
 }
 
 export interface InitializeParams {

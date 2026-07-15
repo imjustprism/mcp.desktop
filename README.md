@@ -44,7 +44,43 @@ curl -s -X POST http://127.0.0.1:8486 -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
+### stdio client via mcp-remote
+
+Many clients only speak stdio. Wrap the HTTP server with `mcp-remote`, which spawns as a stdio child and forwards to the local endpoint. Point it at the root URL. No path, no auth.
+
+Paste this into the client's `mcp.json` (Claude Desktop, Cursor, and similar use the same `mcpServers` shape):
+
+```json
+{
+  "mcpServers": {
+    "discord-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://127.0.0.1:8486",
+        "--transport",
+        "http-only"
+      ]
+    }
+  }
+}
+```
+
+`--transport http-only` forces plain HTTP POST and skips the SSE probe, which this server does not serve. The `discord-mcp` key is the client-side label and can be any name. The server still identifies itself as `discord-mcp` on the wire.
+
 If the client does not see the server, start Discord first so the server is listening, then open the client session. Confirm the "MCP on :8486" toast appears in Discord.
+
+## Name map
+
+The moving parts have four different names. They all refer to this one project.
+
+| Thing | Name |
+| --- | --- |
+| Repo folder | `mcp.desktop` |
+| Plugin name in Discord settings | `mcp` |
+| MCP server name on the wire | `discord-mcp` |
+| Local port | `8486` |
 
 ## Tools
 
@@ -76,6 +112,10 @@ The plugin has two halves. The main process runs the HTTP server, queues incomin
 Find generation lives in `finds/`. A hand-rolled JS tokenizer feeds a run enumerator that drops minified names and require or import spans. A durability scorer ranks the survivors. A match repairer diagnoses and widens or strips broken patch matches under fixed step budgets, so it degrades to "unrepaired" instead of hanging. That core has its own unit tests.
 
 Requests never leave the machine. The server binds to `127.0.0.1` and rejects any non-local origin.
+
+### Origin and CORS
+
+For browser-based clients, the response carries `Access-Control-Allow-Origin: *`, so a page can read the reply. That star is not a green light for the open web. Every request with an `Origin` header is checked, and any non-local origin gets a `403` before the tool runs. Only a client whose page origin is localhost, or a client that sends no `Origin` header at all such as curl or a stdio bridge, can actually drive the server. A remote site that tries to reach `127.0.0.1:8486` from a user's browser is rejected at the origin check regardless of the permissive CORS header.
 
 ## Skill package
 
