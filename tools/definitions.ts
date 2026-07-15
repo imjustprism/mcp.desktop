@@ -4,15 +4,17 @@ export const TOOLS: MCPTool[] = [
     {
         name: "module",
         description:
-            "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: source. exports: list. context: code around pattern. diff: patched vs original. functionAt: full function at pattern. structure: outline without source. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track newly-registered modules. suggest: find patch anchors. annotate: intl-resolved source. css: CSS class index/lookup. explain: one-call dossier (role, real exports, imports, importedBy count, patchedBy, intl/store/dispatch fingerprint).",
+            "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: source. exports: list. context: code around pattern. diff: patched vs original. functionAt: full function at pattern. structure: outline without source. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track newly-registered modules. suggest: find patch anchors. genFinds: exhaustively enumerate build-stable candidate finds (suggest power-mode: excludes require/import spans, resolves intl to #{intl::KEY}, ranks by durability, unique = among loaded factories). annotate: intl-resolved source. css: CSS class index/lookup. explain: one-call dossier (role, real exports, imports, importedBy count, patchedBy, intl/store/dispatch fingerprint).",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "annotate", "css", "explain"],
+                    enum: ["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "genFinds", "annotate", "css", "explain"],
                 },
                 id: { type: "string", description: "Module ID" },
+                minScore: { type: "number", description: "genFinds: min sequence score (default 8)" },
+                requireUnique: { type: "boolean", description: "genFinds: only return finds unique among loaded factories", default: false },
                 props: { type: "array", items: { type: "string" }, description: "Find by export props" },
                 code: { type: "array", items: { type: "string" }, description: "Find by code in exports" },
                 displayName: { type: "string", description: "Find component (partial, exact=true for exact)" },
@@ -48,11 +50,11 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "intl",
-        description: "Intl system. hash: key to hash. reverse: hash to key. search: find hashes by message text. scan: hashes in a module. targets: modules using a key. clearCache: reset the hash to key cache. Use #{intl::KEY} in patches.",
+        description: "Intl system. hash: key to hash. reverse: hash to key. search: find hashes by message text. scan: hashes in a module. targets: modules using a key. recover: reconstruct unmapped keys from live messages (hash-proven; learned keys persist to disk and reload on startup, self-validated against the current hash fn). clearCache: reset the hash to key cache. Use #{intl::KEY} in patches.",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["hash", "reverse", "search", "scan", "targets", "clearCache"] },
+                action: { type: "string", enum: ["hash", "reverse", "search", "scan", "targets", "recover", "clearCache"] },
                 key: { type: "string", description: "Intl key (e.g. MESSAGE_EDITED)" },
                 hash: { type: "string", description: "6-char hash" },
                 query: { type: "string", description: "Search text" },
@@ -79,11 +81,11 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "patch",
-        description: "Patch validation. unique: find matches 1 module. analyze: scan all plugins for broken patches. plugin: one plugin's patches+health. lint: pattern quality score. finds: validate webpack finders. conflicts: modules patched by multiple plugins. diff: patches targeting a module. broken: unconsumed patches.",
+        description: "Patch validation. unique: find matches 1 module. analyze: scan all plugins for broken patches. plugin: one plugin's patches+health. lint: pattern quality score. finds: validate webpack finders. conflicts: modules patched by multiple plugins. diff: patches targeting a module. broken: unconsumed patches. suggestFix: for broken patches (all, or one plugin via pluginName, or a single find), locate the module the stale find still partially matches and generate fresh durable unique replacement finds; pass match to also diagnose the match regex per candidate and return a verified adjusted match when repairable. verifyApplied: prove a plugin's patches actually took effect (per-patch APPLIED/NOT_APPLIED/FIND_DEAD status + source-change check + recent console errors).",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["unique", "analyze", "plugin", "lint", "finds", "conflicts", "diff", "broken"] },
+                action: { type: "string", enum: ["unique", "analyze", "plugin", "lint", "finds", "conflicts", "diff", "broken", "suggestFix", "verifyApplied"] },
                 find: { type: "string", description: "Find string (supports #{intl::KEY})" },
                 match: { type: "string", description: "/regex/flags (\\i for minified vars)" },
                 replace: { type: "string", description: "Replacement" },
@@ -132,11 +134,11 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "discord",
-        description: "Discord context/utils. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: API routes. common: Webpack.Common exports. enum: find module by member. constants: Discord constants. tokens: design tokens.",
+        description: "Discord context/utils. context: current user/channel/guild. api: REST calls. snowflake: decode ID. endpoints: API routes. common: Webpack.Common exports. enum: find module by member. constants: Discord constants. tokens: design tokens. buildInfo: release channel/build id/version hash/host+Equicord versions. experiments: registered experiment descriptors (filterable).",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["context", "api", "snowflake", "endpoints", "common", "enum", "constants", "tokens"] },
+                action: { type: "string", enum: ["context", "api", "snowflake", "endpoints", "common", "enum", "constants", "tokens", "buildInfo", "experiments"] },
                 method: { type: "string", enum: ["get", "post", "patch", "put", "del"] },
                 endpoint: { type: "string", description: "API endpoint" },
                 body: { type: "object" },
@@ -251,6 +253,41 @@ export const TOOLS: MCPTool[] = [
                 duration: { type: "number", description: "ms (5000-120000)", default: 30000 },
                 maxCaptures: { type: "number", default: 50 },
             },
+        },
+    },
+    {
+        name: "console",
+        description: "Renderer console capture (error/warn + uncaught errors + unhandled rejections, ring buffer since plugin start). recent: latest entries (level/sinceMs/limit filters). stats: buffer counts. clear: reset. Check after reloadDiscord or patch changes to confirm nothing broke.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                action: { type: "string", enum: ["recent", "clear", "stats"] },
+                level: { type: "string", enum: ["error", "warn"] },
+                limit: { type: "number", default: 30 },
+                sinceMs: { type: "number", description: "Only entries newer than this many ms" },
+            },
+        },
+    },
+    {
+        name: "batch",
+        description: "Run up to 10 read-only tool calls in one round-trip. calls: [{tool, args}]. Only read-only tool/action combos are accepted (mutating actions like flux.dispatch, plugin.toggle, store.call, module.loadLazy, evaluateCode are rejected per-call). Per-call errors are isolated.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                calls: {
+                    type: "array",
+                    description: "1-10 sub-calls: {tool, args}",
+                    items: {
+                        type: "object",
+                        properties: {
+                            tool: { type: "string" },
+                            args: { type: "object" },
+                        },
+                        required: ["tool"],
+                    },
+                },
+            },
+            required: ["calls"],
         },
     },
     {

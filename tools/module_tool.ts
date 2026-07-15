@@ -19,6 +19,7 @@ import {
     STORE_NAME_RE,
     STRING_LITERAL_RE,
 } from "./constants";
+import { handleGenFinds } from "./gen_finds_tool";
 import * as u from "./utils";
 
 function findModuleMatches(filter: (m: unknown) => boolean, max: number): ModuleMatch[] {
@@ -712,6 +713,8 @@ export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
             source: source.slice(0, maxLen),
         };
     }
+
+    if (action === "genFinds") return handleGenFinds(args);
 
     if (action === "suggest") {
         if (!id) return u.missingArg("id");

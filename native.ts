@@ -1,5 +1,7 @@
-import { IpcMainInvokeEvent } from "electron";
+import { app, IpcMainInvokeEvent } from "electron";
+import { promises as fs } from "fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";
+import { join } from "path";
 
 import { DEFAULT_TIMEOUT_MS, getToolTimeout } from "./timeouts";
 import { IPCMCPRequest, JSONValue, MCPRequest, MCPResponse, ServerStats, ServerStatus, ToolCallParams } from "./types";
@@ -260,6 +262,33 @@ export function stopServer(): { ok: boolean } {
     server?.close();
     server = null;
     return { ok: true };
+}
+
+const KEYMAP_MAX_BYTES = 2_000_000;
+
+function keyMapPath(): string {
+    return join(app.getPath("userData"), "EquicordMcpKeyMap.json");
+}
+
+export async function readKeyMap(): Promise<string | null> {
+    try {
+        const text = await fs.readFile(keyMapPath(), "utf8");
+        return text.length <= KEYMAP_MAX_BYTES ? text : null;
+    } catch {
+        return null;
+    }
+}
+
+export async function writeKeyMap(_event: IpcMainInvokeEvent, json: string): Promise<{ ok: boolean }> {
+    if (typeof json !== "string" || json.length > KEYMAP_MAX_BYTES) return { ok: false };
+    try {
+        const path = keyMapPath();
+        await fs.writeFile(path + ".tmp", json, "utf8");
+        await fs.rename(path + ".tmp", path);
+        return { ok: true };
+    } catch {
+        return { ok: false };
+    }
 }
 
 export function getServerStatus(): ServerStatus {

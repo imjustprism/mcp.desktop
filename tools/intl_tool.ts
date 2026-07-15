@@ -98,10 +98,21 @@ export async function handleIntl(args: IntlToolArgs): Promise<ToolResult> {
         return { key: cleanKey || u.getIntlKeyFromHash(h), hash: h, message, count: all.length, returned: Math.min(all.length, limit), truncated: all.length > limit ? true : undefined, modules: all.slice(0, limit), warning };
     }
 
-    if (action === "clearCache") {
-        u.clearIntlCache();
-        return { message: "Intl hash-to-key cache cleared. Next search rebuilds it from the static key map." };
+    if (action === "recover") {
+        const result = u.recoverIntlKeys(limit);
+        return {
+            ...result,
+            persistedTotal: u.learnedKeyCount(),
+            note: result.recovered
+                ? "Recovered key names for hashes absent from the static map by hashing candidates derived from each live message and proving the exact match. These resolve in reverse/scan/targets/genFinds and persist to disk (self-validated on reload)."
+                : "No new keys recovered this session (loaded locale hashes are already mapped, or their messages did not yield a candidate that hashes back)."
+        };
     }
 
-    return { error: true, message: "action: hash, reverse, search, scan, targets, clearCache" };
+    if (action === "clearCache") {
+        u.clearIntlCache();
+        return { message: "Intl hash-to-key cache cleared. It rebuilds from the static key map plus this-session recovered keys, which survive (they are re-proven by hashing, not blindly trusted)." };
+    }
+
+    return { error: true, message: "action: hash, reverse, search, scan, targets, recover, clearCache" };
 }

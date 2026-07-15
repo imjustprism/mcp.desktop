@@ -1,6 +1,7 @@
 import { PluginNative } from "@utils/types";
 
 import { MCPTool } from "../types";
+import { handleConsole } from "./console_tool";
 import { TOOLS as TOOL_DEFS } from "./definitions";
 import { handleDiscord } from "./discord_tool";
 import { handleFlux } from "./flux_tool";
@@ -46,6 +47,8 @@ const ENTRIES: ToolEntry[] = [
     { name: "testPatch", handler: handleTestPatch, readOnly: true },
     { name: "trace", handler: handleTrace, nonCacheableActions: ["start", "get", "stop", "store"] },
     { name: "intercept", handler: handleIntercept, nonCacheableActions: ["set", "get", "stop"] },
+    { name: "console", handler: handleConsole, neverCache: true, readOnly: true },
+    { name: "batch", handler: handleBatch, neverCache: true, readOnly: true },
     {
         name: "evaluateCode",
         neverCache: true,
@@ -64,6 +67,63 @@ const ENTRIES: ToolEntry[] = [
         },
     },
 ];
+
+const BATCHABLE: Readonly<Record<string, ReadonlySet<string> | "all">> = {
+    intl: "all",
+    search: "all",
+    graph: "all",
+    resolve: "all",
+    testPatch: "all",
+    react: "all",
+    patch: "all",
+    console: new Set(["recent", "stats"]),
+    module: new Set(["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "suggest", "genFinds", "annotate", "css", "explain"]),
+    store: new Set(["find", "list", "state", "snapshot", "links"]),
+    flux: new Set(["events", "listeners", "graph", "producers", "chain"]),
+    discord: new Set(["context", "snowflake", "endpoints", "common", "enum", "constants", "tokens", "buildInfo", "experiments"]),
+    plugin: new Set(["list", "settings"]),
+};
+
+const MAX_BATCH_CALLS = 10;
+
+interface BatchCall {
+    tool?: string;
+    args?: Record<string, unknown>;
+}
+
+async function handleBatch(args: { calls?: BatchCall[] }): Promise<unknown> {
+    const all = Array.isArray(args.calls) ? args.calls : [];
+    const calls = all.slice(0, MAX_BATCH_CALLS);
+    if (!calls.length) return { error: true, message: `calls required: [{tool, args}] (1-${MAX_BATCH_CALLS})` };
+    const dropped = all.length - calls.length;
+
+    const results: unknown[] = [];
+    for (const call of calls) {
+        const tool = call?.tool ?? "";
+        const callArgs = call?.args ?? {};
+        const action = typeof callArgs.action === "string" ? callArgs.action : undefined;
+        const allowed = BATCHABLE[tool];
+        if (!allowed || (allowed !== "all" && !allowed.has(action ?? ""))) {
+            results.push({ tool, action: action ?? null, error: true, message: "not batchable — batch only accepts read-only tool/action combinations" });
+            continue;
+        }
+        const handler = byName.get(tool)?.handler;
+        if (!handler) {
+            results.push({ tool, error: true, message: `Unknown tool: ${tool}` });
+            continue;
+        }
+        try {
+            results.push({ tool, action: action ?? null, result: await handler(callArgs) });
+        } catch (e) {
+            results.push({ tool, action: action ?? null, error: true, message: e instanceof Error ? e.message : String(e) });
+        }
+    }
+    return {
+        count: results.length,
+        ...(dropped > 0 ? { truncated: true, dropped, note: `batch accepts max ${MAX_BATCH_CALLS} calls; ${dropped} dropped` } : {}),
+        results,
+    };
+}
 
 const byName = new Map(ENTRIES.map(e => [e.name, e]));
 

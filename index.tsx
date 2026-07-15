@@ -5,6 +5,7 @@ import definePlugin, { OptionType, PluginNative, ReporterTestable } from "@utils
 import { Toasts } from "@webpack/common";
 
 import { getToolTimeout } from "./timeouts";
+import { installConsoleCapture, uninstallConsoleCapture } from "./tools/console_tool";
 import {
     cleanupAllIntercepts,
     cleanupAllModuleWatches,
@@ -17,6 +18,7 @@ import {
     withTimeout,
 } from "./tools/index";
 import { cacheTtlOf, HANDLERS, isCacheable, TOOLS } from "./tools/registry";
+import { initKeyMapPersistence } from "./tools/utils";
 import { CacheEntry, InitializeParams, MCPRequest, MCPResponse, SessionStats, ToolCallParams, ToolCallResult } from "./types";
 
 const Native = VencordNative.pluginHelpers.mcp as PluginNative<typeof import("./native")>;
@@ -310,6 +312,14 @@ export default definePlugin({
         this.idleCount = 0;
         this.poll();
         Native.notifyRendererReady();
+
+        installConsoleCapture();
+        initKeyMapPersistence({
+            read: () => Native.readKeyMap(),
+            write: json => { void Native.writeKeyMap(json); },
+        }).then(restored => {
+            if (restored) logger.info(`Restored ${restored} recovered intl keys from disk`);
+        }).catch(() => {});
     },
 
     stop(this: PluginInstance) {
@@ -328,6 +338,7 @@ export default definePlugin({
         cleanupAllIntercepts();
         cleanupAllModuleWatches();
         clearCSSIndexCache();
+        uninstallConsoleCapture();
         toolCache.clear();
         Native.stopServer();
     },

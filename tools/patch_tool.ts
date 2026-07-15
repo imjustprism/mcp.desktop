@@ -1,7 +1,11 @@
+import { runtimeHashMessageKey } from "@utils/intlHash";
 import { canonicalizeMatch } from "@utils/patches";
 
+import { generateFinds } from "../finds/genFinds";
+import { diagnoseMatch, literalRuns } from "../finds/matchRepair";
 import { FinderResult, FinderSpec, PatchToolArgs, PluginPatch, PluginReplacement, ToolResult } from "../types";
 import { filters, findAll, findStore, plugins, webpackPatches } from "../webpack";
+import { recentConsole } from "./console_tool";
 import { FORBIDDEN_PATCH_PATTERNS, LIMITS, MINIFIED_VARS_PATTERN } from "./constants";
 import * as u from "./utils";
 
@@ -495,7 +499,170 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
         return { totalBroken: results.length, patches: results };
     }
 
-    return { error: true, message: "Unknown action. Valid: unique, plugin, analyze, lint, finds, conflicts, diff, broken" };
+    if (action === "verifyApplied") {
+        if (!pluginName) return u.missingArg("pluginName");
+        const entry = Object.entries(plugins).find(([nm]) => nm.toLowerCase() === pluginName.toLowerCase());
+        if (!entry) return { error: true, message: `Plugin not found: ${pluginName}` };
+        const [resolvedName, plugin] = entry;
+        const enabled = plugin.started ?? false;
+
+        const results = (plugin.patches ?? []).map((patch, index) => {
+            const matcher = u.canonFindMatcher(patch.find);
+            const ids = u.findModuleIds(matcher.test, 3);
+            const modules = ids.map(mid => {
+                const patchedBy = u.getModulePatchedBy(mid);
+                const original = u.getModuleSource(mid);
+                const patched = u.extractModule(mid, true);
+                const patchedClean = patched.startsWith("//") ? patched.slice(patched.indexOf("\n") + 1) : patched;
+                return {
+                    moduleId: mid,
+                    appliedByThisPlugin: patchedBy.includes(resolvedName),
+                    sourceChanged: patchedClean !== original,
+                    patchedBy: patchedBy.length ? patchedBy : undefined,
+                };
+            });
+            const status = ids.length === 0 ? "FIND_DEAD"
+                : ids.length > 1 ? "FIND_AMBIGUOUS"
+                : modules[0].appliedByThisPlugin && modules[0].sourceChanged ? "APPLIED"
+                : modules[0].appliedByThisPlugin ? "CONSUMED_NO_CHANGE"
+                : "NOT_APPLIED";
+            return { index, find: u.patchFindAsString(patch.find).slice(0, 100), status, modules };
+        });
+
+        const errors = recentConsole("error", 120_000, 20);
+        const applied = results.filter(r => r.status === "APPLIED").length;
+        const verdict = !enabled ? "PLUGIN_DISABLED"
+            : results.length === 0 ? "NO_PATCHES"
+            : applied === results.length ? "ALL_APPLIED"
+            : "INCOMPLETE";
+        return {
+            plugin: resolvedName,
+            enabled,
+            patchCount: results.length,
+            applied,
+            verdict,
+            note: !enabled
+                ? "Plugin is disabled — its patches are not registered, so NOT_APPLIED per patch is expected and does not indicate breakage."
+                : undefined,
+            ambientConsoleErrorsLast2Min: errors.length,
+            ambientErrorsNote: errors.length
+                ? "Renderer errors seen in the last 2 min. These are AMBIENT (from any plugin/tool, not attributed to this plugin's patches) and do not affect the verdict — use only as a weak follow-up signal."
+                : undefined,
+            recentErrors: errors.length ? errors.slice(-5).map(e => e.text.slice(0, 160)) : undefined,
+            patches: results,
+        };
+    }
+
+    if (action === "suggestFix") {
+        const max = u.clamp(args.limit, 10, 1, 50);
+        const canonMatchRe = args.match ? u.safeCall<RegExp | null>(() => u.buildPatchRegex(args.match!), null) : null;
+        const matchInvalid = !!args.match && !canonMatchRe;
+
+        const probeCache = new Map<string, string[]>();
+        const probeScan = (probe: string, earlyExit: number): string[] => {
+            const key = `${earlyExit}:${probe}`;
+            let ids = probeCache.get(key);
+            if (!ids) { ids = u.findModuleIds(src => src.includes(probe), earlyExit); probeCache.set(key, ids); }
+            return ids;
+        };
+
+        type Target = { plugin?: string; rawFind: string; canonFind: string };
+        const targets: Target[] = [];
+        if (args.find) {
+            const m = u.canonFindMatcher(args.find);
+            targets.push({ rawFind: args.find, canonFind: m.canonical });
+        } else {
+            for (const [nm, plugin] of Object.entries(plugins)) {
+                if (pluginName && !nm.toLowerCase().includes(pluginName.toLowerCase())) continue;
+                if (!plugin.patches?.length) continue;
+                for (const patch of plugin.patches) {
+                    const m = u.canonFindMatcher(patch.find);
+                    if (m.isRegex) continue;
+                    if (u.countModuleMatches(m.canonical, 2) === 0) {
+                        targets.push({ plugin: nm, rawFind: u.patchFindAsString(patch.find), canonFind: m.canonical });
+                    }
+                }
+            }
+        }
+
+        const suggestions = targets.slice(0, max).map(t => {
+            const candidateIds: string[] = [];
+            const seenIds = new Set<string>();
+            const addIds = (ids: string[]) => {
+                for (const id of ids) if (!seenIds.has(id) && candidateIds.length < 3) { seenIds.add(id); candidateIds.push(id); }
+            };
+
+            const hashes = new Set<string>();
+            for (const im of t.rawFind.matchAll(/#\{intl::([\w$+/]+?)(?:::(\w+))?\}/g)) {
+                const hash = im[2] === "raw" ? im[1] : runtimeHashMessageKey(im[1]);
+                if (hash) hashes.add(hash);
+            }
+            for (const hm of t.canonFind.matchAll(/(?:\.|\[")([A-Za-z0-9+/]{6})(?:"\])?/g)) {
+                if (u.getIntlKeyFromHash(hm[1])) hashes.add(hm[1]);
+            }
+            for (const hash of hashes) {
+                if (candidateIds.length >= 3) break;
+                addIds(u.findModuleIds(src => src.includes(`.t.${hash}`) || src.includes(`.t["${hash}"]`), 4));
+            }
+
+            if (candidateIds.length < 3) addIds(probeScan(t.canonFind, 4));
+
+            if (candidateIds.length < 3) {
+                const probes = new Set<string>();
+                for (const frag of t.canonFind.split(/(?=[.,()[\]{}:;=!&|?])|(?<=[.,()[\]{}:;=!&|?])/).map(f => f.trim())) {
+                    if (frag.length >= 6) probes.add(frag);
+                }
+                if (canonMatchRe) for (const lit of literalRuns(canonMatchRe.source, 5)) probes.add(lit);
+                const freq = new Map<string, number>();
+                let narrowest: string[] | null = null;
+                for (const probe of [...probes].slice(0, 12)) {
+                    const ids = probeScan(probe, 25);
+                    if (ids.length === 0 || ids.length >= 25) continue;
+                    for (const id of new Set(ids)) freq.set(id, (freq.get(id) ?? 0) + 1);
+                    if (!narrowest || ids.length < narrowest.length) narrowest = ids;
+                }
+                const ranked = [...freq.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+                const intersecting = ranked.filter(e => e[1] >= 2).map(e => e[0]);
+                if (intersecting.length) addIds(intersecting);
+                else if (narrowest && narrowest.length <= 5) addIds(narrowest);
+            }
+
+            const targetCandidates = candidateIds.slice(0, 3).map(id => {
+                const source = u.getModuleSource(id);
+                const finds = source ? generateFinds(source, { hashToKey: h => u.getIntlKeyFromHash(h), limit: 6 }) : [];
+                const canonByFind = new Map(finds.map(f => [f.find, canonicalizeMatch(f.find)]));
+                const counts = u.batchCountModuleMatches([...new Set(canonByFind.values())], 2);
+                const suggestedFinds = finds
+                    .filter(f => (counts.get(canonByFind.get(f.find) ?? f.find)?.count ?? 0) === 1)
+                    .slice(0, 3)
+                    .map(f => ({ find: f.find, durability: f.durability, tier: f.tier }));
+                const repair = canonMatchRe && source ? diagnoseMatch(source, canonMatchRe.source, canonMatchRe.flags) : undefined;
+                const matchRepair = repair && {
+                    status: repair.status,
+                    failureKind: repair.failureKind,
+                    ...(repair.adjustedPattern && { adjustedMatch: repair.adjustedPattern, note: repair.adjustmentNote }),
+                    ...(repair.missingLiterals.length && { missingLiterals: repair.missingLiterals.slice(0, 5) })
+                };
+                const keep = suggestedFinds.length > 0 || !!matchRepair || (!canonMatchRe && finds.length > 0);
+                return { moduleId: id, hint: u.getModuleHint(id), suggestedFinds, keep, ...(matchRepair && { matchRepair }) };
+            }).filter(c => c.keep).map(({ keep, ...c }) => c);
+
+            return { plugin: t.plugin, brokenFind: t.rawFind.slice(0, 120), targetCandidates };
+        });
+
+        const anyLocated = suggestions.some(s => s.targetCandidates.length > 0);
+        return {
+            count: suggestions.length,
+            note: "For each broken find, the target module is located and fresh durable unique finds are generated. Pass `match` to also diagnose the match regex against each candidate: matchRepair reports whether it still fits and, when repairable, a verified adjusted match (widened bounded gaps / stripped stale lookarounds).",
+            ...(matchInvalid && { matchWarning: "The provided `match` could not be parsed as a regex and was ignored; matchRepair was not computed. Pass it as /pattern/flags or a plain regex body." }),
+            ...(suggestions.length && !anyLocated && {
+                hint: "Could not relocate the target module. Relocation probes intl hashes, the full canonical find, and fragment/match-literal intersections — a find mutated INSIDE its single unique token (not just trailing junk) can defeat it. Try passing `match` too, or manually `search` for a surviving literal substring of the find.",
+            }),
+            suggestions
+        };
+    }
+
+    return { error: true, message: "Unknown action. Valid: unique, plugin, analyze, lint, finds, conflicts, diff, broken, suggestFix, verifyApplied" };
 }
 
 function validateFinder(spec: FinderSpec): FinderResult {

@@ -47,7 +47,7 @@ export async function handleGraph(args: GraphToolArgs): Promise<ToolResult> {
     }
 
     if (action === "neighborhood") {
-        const budget = 60;
+        const budget = args.limit != null ? limit : 60;
         const nodes = new Set<string>([id]);
         const queue: string[] = [id];
         while (queue.length && nodes.size < budget) {

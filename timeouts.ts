@@ -9,6 +9,10 @@ const TIMEOUT_MS: Readonly<Record<string, number>> = {
     "intercept:set": 120_000,
     "patch:analyze": 60_000,
     "patch:finds": 60_000,
+    "patch:suggestFix": 120_000,
+    "intl:recover": 60_000,
+    "patch:verifyApplied": 60_000,
+    batch: 120_000,
     search: 60_000,
 };
 

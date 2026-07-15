@@ -307,12 +307,12 @@ export interface ToolError {
 
 export type ToolResult<T = Record<string, unknown>> = T | ToolError;
 
-type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "functionAt" | "structure" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate" | "css" | "explain";
+type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "functionAt" | "structure" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate" | "css" | "explain" | "genFinds";
 type StoreAction = "find" | "list" | "state" | "call" | "snapshot" | "links";
-type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "clearCache";
+type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "recover" | "clearCache";
 type FluxToolAction = "events" | "dispatch" | "listeners" | "graph" | "producers" | "chain";
 type GraphAction = "imports" | "importedBy" | "path" | "neighborhood" | "exports";
-type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "conflicts" | "diff" | "broken";
+type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "conflicts" | "diff" | "broken" | "suggestFix" | "verifyApplied";
 
 type FinderType = "byProps" | "byCode" | "store" | "componentByCode" | "exportedComponent" | "cssClasses" | "byClassNames";
 
@@ -328,7 +328,7 @@ export interface FinderResult extends FinderSpec {
     error?: string;
 }
 type ReactAction = "query" | "styles" | "tree" | "path" | "fiber" | "props" | "hooks" | "contexts" | "find" | "state" | "source";
-type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "constants" | "tokens";
+type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "constants" | "tokens" | "buildInfo" | "experiments";
 type TraceAction = "start" | "get" | "stop" | "store";
 type InterceptAction = "set" | "get" | "stop";
 type PluginAction = "list" | "enable" | "disable" | "toggle" | "settings" | "setSetting";
@@ -359,6 +359,8 @@ export interface ModuleToolArgs extends ToolArgsBase<ModuleAction>, CaptureWindo
     chars?: number;
     filter?: string;
     watchId?: number;
+    minScore?: number;
+    requireUnique?: boolean;
 }
 
 export interface StoreToolArgs extends ToolArgsBase<StoreAction> {
@@ -416,6 +418,13 @@ export interface ReactToolArgs extends ToolArgsBase<ReactAction> {
     direction?: "up" | "down";
     includeProps?: boolean;
     breadth?: number;
+}
+
+export interface ConsoleToolArgs {
+    action?: "recent" | "clear" | "stats";
+    level?: "error" | "warn";
+    limit?: number;
+    sinceMs?: number;
 }
 
 export interface DiscordToolArgs {

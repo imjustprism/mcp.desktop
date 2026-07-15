@@ -111,10 +111,13 @@ export async function handlePlugin(args: PluginToolArgs): Promise<ToolResult> {
     });
 
     const enabledCount = pluginList.filter(([, p]) => p.started).length;
+    const truncated = pluginList.length > maxPlugins;
     return {
         total: pluginList.length,
         enabled: enabledCount,
+        returned: pluginInfos.length,
+        truncated,
         plugins: pluginInfos,
-        note: pluginList.length > maxPlugins ? "Use name param to filter" : undefined,
+        note: truncated ? `Showing ${pluginInfos.length} of ${pluginList.length}. Pass name to filter (substring match).` : undefined,
     };
 }

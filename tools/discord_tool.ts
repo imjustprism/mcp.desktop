@@ -1,7 +1,7 @@
 import { ChannelStore, GuildStore, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
 
 import { DiscordAPIError, DiscordToolArgs, ToolResult } from "../types";
-import { DesignTokensModule, DiscordConstants, Endpoints, findAll, getCommonModules, getSnowflakeUtils } from "../webpack";
+import { DesignTokensModule, DiscordConstants, Endpoints, findAll, findStore, getCommonModules, getSnowflakeUtils } from "../webpack";
 import { LIMITS } from "./constants";
 import * as u from "./utils";
 
@@ -24,6 +24,45 @@ export async function handleDiscord(args: DiscordToolArgs): Promise<ToolResult> 
             u.mcpLogger.error(`discord api ${method} ${endpoint}: ${msg}`);
             return { error: true, status: err.status ?? err.httpStatus, message: msg };
         }
+    }
+
+    if (action === "buildInfo") {
+        const env = (window as unknown as { GLOBAL_ENV?: Record<string, unknown> }).GLOBAL_ENV ?? {};
+        const native = (window as unknown as { DiscordNative?: { app?: { getVersion?: () => string; getReleaseChannel?: () => string } } }).DiscordNative;
+        const sentryTags = env.SENTRY_TAGS as { buildId?: string; buildType?: string } | undefined;
+        return {
+            releaseChannel: env.RELEASE_CHANNEL ?? u.safeCall(() => native?.app?.getReleaseChannel?.() ?? null, null),
+            buildId: sentryTags?.buildId ?? null,
+            buildType: sentryTags?.buildType ?? null,
+            versionHash: env.VERSION_HASH ?? null,
+            apiVersion: env.API_VERSION ?? null,
+            apiEndpoint: env.API_ENDPOINT ?? null,
+            hostVersion: u.safeCall(() => native?.app?.getVersion?.() ?? null, null),
+            equicordVersion: VERSION,
+            userAgent: navigator.userAgent.slice(0, 160),
+        };
+    }
+
+    if (action === "experiments") {
+        const store = findStore("ExperimentStore") as Record<string, unknown> | null;
+        if (!store) return { error: true, message: "ExperimentStore not found" };
+        const getRegistered = store.getRegisteredExperiments as (() => Record<string, Record<string, unknown>>) | undefined;
+        const descriptors = u.safeCall(() => getRegistered?.() ?? {}, {} as Record<string, Record<string, unknown>>);
+        let entries = Object.entries(descriptors);
+        if (filterPattern) {
+            const q = filterPattern.toLowerCase();
+            entries = entries.filter(([k, v]) => k.toLowerCase().includes(q) || String(v?.title ?? v?.label ?? "").toLowerCase().includes(q));
+        }
+        return {
+            count: entries.length,
+            experiments: entries.slice(0, LIMITS.DISCORD.ENUM_MATCHES * 4).map(([k, v]) => ({
+                id: k,
+                type: typeof v?.type === "string" ? v.type : undefined,
+                label: String(v?.title ?? v?.label ?? "").slice(0, 80) || undefined,
+                buckets: Array.isArray(v?.buckets) ? (v.buckets as unknown[]).length : undefined,
+            })),
+            note: entries.length > LIMITS.DISCORD.ENUM_MATCHES * 4 ? "Use filter to narrow" : undefined,
+        };
     }
 
     if (action === "snowflake") {

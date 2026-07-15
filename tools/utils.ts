@@ -6,6 +6,8 @@ import { canonicalizeMatch } from "@utils/patches";
 import { escapeRegExp } from "@utils/text";
 import * as WebpackPatcher from "@webpack/patcher";
 
+import { recoverIntlKey } from "../finds/intlRecover";
+import { mergeValidated, serializeKeyMap, validatePersistedEntries } from "../finds/keyMapPersist";
 import keyMapJson from "../map/key_map.json";
 import {
     ActiveTrace,
@@ -286,9 +288,39 @@ export const moduleWatchState = {
 };
 
 let intlHashToKeyMap: Map<string, string> | null = null;
+const intlRecoverFailed = new Set<string>();
+const runtimeLearnedKeys = new Map<string, string>();
+let keyMapWriter: ((json: string) => void) | null = null;
+let keyMapPersistTimer: ReturnType<typeof setTimeout> | null = null;
+const KEYMAP_PERSIST_DEBOUNCE_MS = 2000;
 
 export function clearIntlCache(): void {
     intlHashToKeyMap = null;
+    intlRecoverFailed.clear();
+}
+
+export function learnedKeyCount(): number {
+    return runtimeLearnedKeys.size;
+}
+
+function scheduleKeyMapPersist(): void {
+    if (!keyMapWriter || !runtimeLearnedKeys.size) return;
+    if (keyMapPersistTimer) clearTimeout(keyMapPersistTimer);
+    keyMapPersistTimer = setTimeout(() => {
+        keyMapPersistTimer = null;
+        keyMapWriter?.(serializeKeyMap(runtimeLearnedKeys));
+    }, KEYMAP_PERSIST_DEBOUNCE_MS);
+}
+
+export async function initKeyMapPersistence(io: { read: () => Promise<string | null>; write: (json: string) => void }): Promise<number> {
+    keyMapWriter = io.write;
+    const text = await io.read();
+    if (!text) return 0;
+    let raw: unknown;
+    try { raw = JSON.parse(text); } catch { return 0; }
+    const validated = validatePersistedEntries(raw, runtimeHashMessageKey);
+    mergeValidated(runtimeLearnedKeys, validated);
+    return intlHashToKeyMap ? mergeValidated(intlHashToKeyMap, validated) : validated.size;
 }
 
 let localeMessagesCache: Record<string, unknown[]> | null = null;
@@ -350,11 +382,36 @@ export function buildIntlHashToKeyMap(): Map<string, string> {
         }
     }
 
+    mergeValidated(map, runtimeLearnedKeys);
+
     return map;
 }
 
 export function getIntlKeyFromHash(hash: string): string | null {
     return buildIntlHashToKeyMap().get(hash) ?? null;
+}
+
+export function recoverIntlKeys(recoverLimit: number, maxAttempts = 3000): { attempted: number; recovered: number; entries: Array<{ hash: string; key: string; message: string }> } {
+    const map = buildIntlHashToKeyMap();
+    const locale = getLocaleMessages();
+    const entries: Array<{ hash: string; key: string; message: string }> = [];
+    let attempted = 0;
+    if (!locale) return { attempted, recovered: 0, entries };
+    for (const hash in locale) {
+        if (attempted >= maxAttempts || entries.length >= recoverLimit) break;
+        if (map.has(hash) || intlRecoverFailed.has(hash)) continue;
+        const message = extractIntlText(locale[hash]);
+        if (!message) continue;
+        attempted++;
+        const key = recoverIntlKey(hash, message, runtimeHashMessageKey);
+        if (key) {
+            map.set(hash, key);
+            runtimeLearnedKeys.set(hash, key);
+            entries.push({ hash, key, message: message.slice(0, 80) });
+        } else intlRecoverFailed.add(hash);
+    }
+    if (entries.length) scheduleKeyMapPersist();
+    return { attempted, recovered: entries.length, entries };
 }
 
 export function findModuleIds(predicate: (source: string, id: string) => boolean, limit: number): string[] {
