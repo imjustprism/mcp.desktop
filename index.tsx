@@ -127,9 +127,10 @@ const SUPPORTED_PROTOCOLS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
 const SERVER_INFO = { name: "discord-mcp", title: "Discord Client Introspection", version: "1.0.0" };
 const INSTRUCTIONS =
     "A Discord MCP server exposing the desktop client's internals to an AI client: webpack modules, Flux stores and dispatcher, the React tree, and the intl hash system. " +
-    "Search modules by props/code/pattern, read and annotate source, generate build-stable patch anchors, validate and repair patches (testPatch/patch) before writing them, resolve intl " +
-    "#{intl::KEY} hashes, and inspect the live React/Flux/store runtime. Results carry both a text block and structuredContent. " +
-    "Start with module.find / search / discord.context, then module.suggest + testPatch to author a patch.";
+    "Call discord.orient first for a one-call session bootstrap (ready state, runtime, counts, build, console errors, plugin totals, and a suggested next move). " +
+    "Then work the skill loop: resolve a landmark (resolve) or search text (search, intl.search) to the owning module, read and annotate its source (module), " +
+    "generate build-stable anchors (module.suggest, module.genFinds), then validate with testPatch and patch before writing. Inspect the live React/Flux/store runtime as needed. " +
+    "Results carry both a text block and structuredContent.";
 
 const sessionStats: SessionStats = {
     initialized: false,

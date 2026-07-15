@@ -214,7 +214,9 @@ export async function handleReact(args: ReactToolArgs): Promise<ToolResult> {
 
     if (action === "source") {
         if (!fiber) return fiberMiss(false, "No fiber found");
-        const stack: Array<{ name: string | null; moduleId: string; exportKey: string; hint: string | null }> = [];
+        const { reverse } = u.buildDependencyGraph();
+        type SourceCandidate = { name: string | null; moduleId: string; exportKey: string; hint: string | null; importedByCount: number; likelyPrimitive: boolean };
+        const stack: SourceCandidate[] = [];
         const seen = new Set<string>();
         for (const { fiber: f } of u.fibersUp(fiber, maxDepth)) {
             const type = f.type as unknown;
@@ -223,14 +225,23 @@ export async function handleReact(args: ReactToolArgs): Promise<ToolResult> {
             const hit = u.lookupIdentity(inner) ?? u.lookupIdentity(type);
             if (hit && !seen.has(`${hit.id}:${hit.key}`)) {
                 seen.add(`${hit.id}:${hit.key}`);
-                stack.push({ name: u.getComponentInfo(f).name, moduleId: hit.id, exportKey: hit.key, hint: u.getModuleHint(hit.id) });
+                const importedByCount = reverse.get(hit.id)?.length ?? 0;
+                stack.push({ name: u.getComponentInfo(f).name, moduleId: hit.id, exportKey: hit.key, hint: u.getModuleHint(hit.id), importedByCount, likelyPrimitive: importedByCount >= LIMITS.REACT.PRIMITIVE_IMPORTED_BY });
                 if (stack.length >= limit) break;
             }
         }
         if (!stack.length) return { found: true, selector, hasFiber: true, stack: [], message: "No ancestor fiber resolved to a webpack module (component may be inline/anonymous)" };
         const nearest = stack[0];
         const patchedBy = u.getModulePatchedBy(nearest.moduleId);
-        return { found: true, selector, nearest: { ...nearest, patchedBy: patchedBy.length ? patchedBy : undefined }, stack };
+        const ranked = stack
+            .map((c, i) => ({ c, i }))
+            .sort((a, b) => (Number(a.c.likelyPrimitive) - Number(b.c.likelyPrimitive)) || (a.c.importedByCount - b.c.importedByCount) || (a.i - b.i))
+            .map(x => x.c);
+        const allPrimitives = stack.every(c => c.likelyPrimitive);
+        const note = allPrimitives
+            ? "Every candidate looks like a design-system primitive. Pivot to intl.search on the element label."
+            : "Prefer the lowest-importedByCount non-primitive in ranked[], not nearest.";
+        return { found: true, selector, nearest: { ...nearest, patchedBy: patchedBy.length ? patchedBy : undefined }, ranked, stack, note };
     }
 
     if (action === "fiber") {

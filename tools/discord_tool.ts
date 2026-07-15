@@ -4,12 +4,33 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { PluginNative } from "@utils/types";
 import { ChannelStore, GuildStore, RestAPI, SelectedChannelStore, SelectedGuildStore, UserStore } from "@webpack/common";
 
 import { DiscordAPIError, DiscordToolArgs, ToolResult } from "../types";
-import { DesignTokensModule, DiscordConstants, Endpoints, findAll, findStore, getCommonModules, getSnowflakeUtils } from "../webpack";
+import { DesignTokensModule, DiscordConstants, Endpoints, findAll, findStore, getCommonModules, getSnowflakeUtils, plugins, wreq } from "../webpack";
+import { recentConsole } from "./console_tool";
 import { LIMITS } from "./constants";
 import * as u from "./utils";
+
+const Native = VencordNative.pluginHelpers.mcp as PluginNative<typeof import("../native")>;
+
+function readBuildInfo() {
+    const env = (window as unknown as { GLOBAL_ENV?: Record<string, unknown> }).GLOBAL_ENV ?? {};
+    const native = (window as unknown as { DiscordNative?: { app?: { getVersion?: () => string; getReleaseChannel?: () => string } } }).DiscordNative;
+    const sentryTags = env.SENTRY_TAGS as { buildId?: string; buildType?: string } | undefined;
+    return {
+        releaseChannel: env.RELEASE_CHANNEL ?? u.safeCall(() => native?.app?.getReleaseChannel?.() ?? null, null),
+        buildId: sentryTags?.buildId ?? null,
+        buildType: sentryTags?.buildType ?? null,
+        versionHash: env.VERSION_HASH ?? null,
+        apiVersion: env.API_VERSION ?? null,
+        apiEndpoint: env.API_ENDPOINT ?? null,
+        hostVersion: u.safeCall(() => native?.app?.getVersion?.() ?? null, null),
+        modVersion: VERSION,
+        userAgent: navigator.userAgent.slice(0, 160),
+    };
+}
 
 export async function handleDiscord(args: DiscordToolArgs): Promise<ToolResult> {
     const { action, method, endpoint, body, id, filter: filterPattern, memberName } = args;
@@ -32,20 +53,40 @@ export async function handleDiscord(args: DiscordToolArgs): Promise<ToolResult> 
         }
     }
 
-    if (action === "buildInfo") {
-        const env = (window as unknown as { GLOBAL_ENV?: Record<string, unknown> }).GLOBAL_ENV ?? {};
-        const native = (window as unknown as { DiscordNative?: { app?: { getVersion?: () => string; getReleaseChannel?: () => string } } }).DiscordNative;
-        const sentryTags = env.SENTRY_TAGS as { buildId?: string; buildType?: string } | undefined;
+    if (action === "buildInfo") return readBuildInfo();
+
+    if (action === "orient") {
+        const ready = !!UserStore.getCurrentUser();
+        const build = readBuildInfo();
+
+        let serverRunning = true;
+        let port = 0;
+        try {
+            const status = await Native.getServerStatus();
+            serverRunning = status.running;
+            port = status.port;
+        } catch {
+            serverRunning = false;
+        }
+
+        const pluginNames = Object.keys(plugins);
+        const enabledPlugins = pluginNames.filter(n => plugins[n]?.started).length;
+
         return {
-            releaseChannel: env.RELEASE_CHANNEL ?? u.safeCall(() => native?.app?.getReleaseChannel?.() ?? null, null),
-            buildId: sentryTags?.buildId ?? null,
-            buildType: sentryTags?.buildType ?? null,
-            versionHash: env.VERSION_HASH ?? null,
-            apiVersion: env.API_VERSION ?? null,
-            apiEndpoint: env.API_ENDPOINT ?? null,
-            hostVersion: u.safeCall(() => native?.app?.getVersion?.() ?? null, null),
-            modVersion: VERSION,
-            userAgent: navigator.userAgent.slice(0, 160),
+            ready,
+            runtime: { serverRunning, port },
+            counts: {
+                modules: u.getModuleIds().length,
+                loadedModules: Object.keys(wreq.c).length,
+                stores: u.getAllStoreNames().length,
+                plugins: pluginNames.length,
+            },
+            build: { releaseChannel: build.releaseChannel, versionHash: build.versionHash, modVersion: build.modVersion },
+            consoleErrors: recentConsole("error").length,
+            plugins: { total: pluginNames.length, enabled: enabledPlugins },
+            next: ready
+                ? { tool: "resolve", action: null, reason: "resolve a landmark (intl hash, CSS class, StoreName, SCREAMING_SNAKE) to its owning module" }
+                : { tool: "reloadDiscord", action: null, reason: "client not hydrated yet, reload then retry" },
         };
     }
 

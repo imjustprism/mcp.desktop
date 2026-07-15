@@ -640,13 +640,20 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
 
             const targetCandidates = candidateIds.slice(0, 3).map(id => {
                 const source = u.getModuleSource(id);
-                const finds = source ? generateFinds(source, { hashToKey: h => u.getIntlKeyFromHash(h), limit: 6 }) : [];
-                const canonByFind = new Map(finds.map(f => [f.find, canonicalizeMatch(f.find)]));
+                const finds = source ? generateFinds(source, { hashToKey: h => u.getIntlKeyFromHash(h), limit: 60, synthesizePairs: true }) : [];
+                const literalFinds = finds.filter(f => !f.regex);
+                const canonByFind = new Map(literalFinds.map(f => [f.find, canonicalizeMatch(f.find)]));
                 const counts = u.batchCountModuleMatches([...new Set(canonByFind.values())], 2);
                 const suggestedFinds = finds
-                    .filter(f => (counts.get(canonByFind.get(f.find) ?? f.find)?.count ?? 0) === 1)
+                    .filter(f => {
+                        if (f.regex) {
+                            const re = u.safeCall<RegExp | null>(() => new RegExp(f.find), null);
+                            return !!re && u.findModuleIds(src => re.test(src), 2).length === 1;
+                        }
+                        return (counts.get(canonByFind.get(f.find) ?? f.find)?.count ?? 0) === 1;
+                    })
                     .slice(0, 3)
-                    .map(f => ({ find: f.find, durability: f.durability, tier: f.tier }));
+                    .map(f => ({ find: f.find, durability: f.durability, tier: f.tier, ...(f.regex && { regex: true, type: f.type }) }));
                 const repair = canonMatchRe && source ? diagnoseMatch(source, canonMatchRe.source, canonMatchRe.flags) : undefined;
                 const matchRepair = repair && {
                     status: repair.status,
@@ -664,7 +671,7 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
         const anyLocated = suggestions.some(s => s.targetCandidates.length > 0);
         return {
             count: suggestions.length,
-            note: "For each broken find, the target module is located and fresh durable unique finds are generated. Pass `match` to also diagnose the match regex against each candidate: matchRepair reports whether it still fits and, when repairable, a verified adjusted match (widened bounded gaps / stripped stale lookarounds).",
+            note: "For each broken find, the target module is located and fresh durable unique finds are generated. When no single token is unique, bounded-gap regex pair finds (regex:true, type 'pair') are offered instead. Pass `match` to also diagnose the match regex against each candidate: matchRepair reports whether it still fits and, when repairable, a verified adjusted match (widened bounded gaps / stripped stale lookarounds).",
             ...(matchInvalid && { matchWarning: "The provided `match` could not be parsed as a regex and was ignored. matchRepair was not computed. Pass it as /pattern/flags or a plain regex body." }),
             ...(suggestions.length && !anyLocated && {
                 hint: "Could not relocate the target module. Relocation probes intl hashes, the full canonical find, and fragment/match-literal intersections. A find mutated INSIDE its single unique token (not just trailing junk) can defeat it. Try passing `match` too, or manually `search` for a surviving literal substring of the find.",

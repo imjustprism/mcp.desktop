@@ -336,7 +336,7 @@ export interface FinderResult extends FinderSpec {
     error?: string;
 }
 type ReactAction = "query" | "styles" | "tree" | "path" | "fiber" | "props" | "hooks" | "contexts" | "find" | "state" | "source";
-type DiscordAction = "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "constants" | "tokens" | "buildInfo" | "experiments";
+type DiscordAction = "orient" | "context" | "api" | "snowflake" | "endpoints" | "common" | "enum" | "constants" | "tokens" | "buildInfo" | "experiments";
 type TraceAction = "start" | "get" | "stop" | "store";
 type InterceptAction = "set" | "get" | "stop";
 type PluginAction = "list" | "enable" | "disable" | "toggle" | "settings" | "setSetting";

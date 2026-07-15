@@ -1,11 +1,31 @@
 ---
 name: discord-modding
-description: Authoring and repairing Equicord/Vencord plugin patches against live Discord internals via the discord-dev MCP server (webpack modules, Flux, intl, React fibers on 127.0.0.1:8486).
+description: Building Equicord/Vencord plugins against live Discord internals via the discord-dev MCP server (webpack modules, Flux, intl, React fibers on 127.0.0.1:8486). Prefer managed plugin APIs (message popover buttons, message events, context menus, commands, Flux) and drop to webpack patches only when no API fits. Covers patch authoring and repair.
 ---
 
 # discord-modding
 
-Author and repair Equicord/Vencord patches against a **live** Discord renderer. The MCP exposes webpack factories, Flux stores/dispatcher, the intl hash system, and the React fiber tree. Minified names are dead. You locate code by props/code/intl/CSS/pixel, not identifiers. Every patch is validated against the running build before you write to disk.
+Build Equicord/Vencord plugins against a **live** Discord renderer. Most plugin features attach through a managed API that survives every Discord build with no find/match/replace. A webpack patch is the fallback for reshaping Discord's own render output that no API exposes. When you do patch, the MCP exposes webpack factories, Flux stores/dispatcher, the intl hash system, and the React fiber tree. Minified names are dead. You locate code by props/code/intl/CSS/pixel, not identifiers. Every patch is validated against the running build before you write to disk.
+
+## Start here: classify the feature, prefer a plugin API, patch only if no API fits
+
+Before opening the patch loop, decide what the feature actually is. If it maps to a managed API below, use the API. A patch is for chrome Discord owns that no API surfaces. See `references/plugin-apis.md` for signatures and when-to-use.
+
+| Feature | Use this, not a patch | definePlugin field / API |
+|---|---|---|
+| Button on the message hover toolbar | `addMessagePopoverButton` (MessagePopoverAPI) | `messagePopoverButton` |
+| Block, rewrite, or inspect an outgoing message | `addMessagePreSendListener` (MessageEventsAPI) | `onBeforeMessageSend` / `onBeforeMessageEdit` |
+| React to a message click | `addMessageClickListener` (MessageEventsAPI) | `onMessageClick` |
+| Add or edit a context menu item | `addContextMenuPatch` + `findGroupChildrenByChildId` (ContextMenuAPI) | `contextMenus` |
+| React to a Discord event (message create, channel switch, presence) | `FluxDispatcher.subscribe` | `flux` |
+| Slash command | `registerCommand` (CommandsAPI) | `commands` |
+| Button in the chat input bar | `addChatBarButton` (ChatInputButtonAPI) | `chatBarButton` |
+| Component rendered below a message | MessageAccessoriesAPI | `renderMessageAccessory` |
+| Decoration by a message author or member list entry | MessageDecorationsAPI / MemberListDecoratorsAPI | `renderMessageDecoration` / `renderMemberListDecorator` |
+| Persist plugin config | `definePluginSettings` (Settings API) | `settings` |
+| Re-render a message after mutating it | MessageUpdaterAPI | via `Vencord.Api.MessageUpdater` |
+
+Patch only when the feature is: reshaping layout or chrome no API exposes (a toolbar Discord owns, a modal's internal render, injecting JSX into a component), gating or rewriting Discord's own render output, or reading a prop that never reaches an API surface. Then run the loop below.
 
 ## Quickstart: the canonical patch-authoring loop
 
@@ -60,6 +80,7 @@ Example calls (tool name + args):
 
 ## References
 
+- `references/plugin-apis.md`. The managed plugin APIs (message popover, message events, context menus, Flux, commands, chat bar, accessories, settings). Try these before any patch. Grounded in `src/api` and `src/utils/types.ts`.
 - `references/workflow.md`. The full locate->dossier->finds->test->write->verify loop with decision points and fallbacks.
 - `references/finds.md`. Build-stable find construction, `genFinds`/`suggest`, uniqueness, ranking, intl resolution.
 - `references/patch-repair.md`. Diagnosing broken patches: `patch.analyze`/`broken`/`suggestFix`/`verifyApplied`, stale finds/matches.
@@ -77,3 +98,4 @@ Example calls (tool name + args):
 4. **Use `\i` for minified identifiers in `match`.** Minified var/function names are unstable. Write `\i` (matches a minified ident) in the regex instead of hardcoding `e`, `t`, `n`, etc. Anchor around stable literals/props, not the generated names.
 5. **Verify after reload.** A patch that passed `testPatch` can still fail to apply. After `reloadDiscord`, run `patch.verifyApplied` (per-patch APPLIED/NOT_APPLIED/FIND_DEAD) and `console.recent {level:"error"}` before declaring success.
 6. **Batch-first.** Every read-only call is batchable. Collapse recon into one `batch` round-trip (up to 10 calls) instead of serial calls. Per-call errors are isolated, so a failing sub-call never aborts the rest. Only mutating actions (`flux.dispatch`, `plugin.toggle`, `store.call`, `module.loadLazy`, `evaluateCode`, `reloadDiscord`) must go solo.
+7. **`testPatch` PASS is not success.** PASS means the find is unique and the regex compiled, and `verifyApplied` APPLIED means the patch attached. Neither proves the feature works. After `reloadDiscord`, exercise the real behavior (click the button, send the message, open the menu, fire the event) and confirm the observable result plus a clean `console.recent {level:"error"}` before declaring done. API-based features have no patch to verify, so post-reload behavior confirmation is the only signal.
