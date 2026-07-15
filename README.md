@@ -1,6 +1,6 @@
 # mcp.desktop
 
-An MCP server that exposes the Discord desktop client's internals to an AI assistant. It runs as a Vencord or Equicord plugin inside the Discord renderer, so it has direct access to the webpack module graph, the Flux stores and dispatcher, the React tree, and the intl hash system. An AI client connects over local HTTP and can search modules, author and validate patches, resolve intl keys, and inspect the live runtime.
+An MCP server that exposes the Discord desktop client's internals to an AI assistant. It runs as a Vencord or Equicord plugin inside the Discord renderer, so it has direct access to the webpack module graph, the Flux stores and dispatcher, the React tree, and the intl hash system. An AI client connects over local HTTP and can search modules, generate build-stable patch anchors, author, validate, and repair patches, resolve intl keys, and inspect the live runtime.
 
 The main use case is writing and debugging Vencord and Equicord patches. Production Discord ships minified names, so the tools work from stable anchors instead: intl keys, CSS class suffixes, store display names, and the module dependency graph.
 
@@ -42,7 +42,7 @@ If the client does not see the server, start Discord first so the server is list
 
 | Tool | What it does |
 | --- | --- |
-| `module` | Find, read, and inspect webpack modules. Search by props, code, display name, CSS class, export name, or pattern. Extract source, list exports, diff patched against original, and watch newly registered modules. |
+| `module` | Find, read, and inspect webpack modules. Search by props, code, display name, CSS class, export name, or pattern. Extract source, list exports, diff patched against original, and watch newly registered modules. Generate ranked build-stable find candidates (`genFinds`), get a one-call module dossier (`explain`), read intl-annotated source, and index CSS classes. |
 | `search` | Search module sources by string or regex, with an AND mode that matches modules containing every string. |
 | `resolve` | Resolve any Discord landmark to its owning modules. Accepts an intl hash, a CSS class or hex suffix, a store name, a SCREAMING_SNAKE key, or a literal string. |
 | `graph` | Module dependency graph built from require call sites. Lists imports, importedBy, the shortest path between two modules, a local neighborhood, and real public export names. |
@@ -51,11 +51,13 @@ If the client does not see the server, start Discord first so the server is list
 | `trace` | Record dispatched Flux actions or a single store's state changes over a time window. Captures auto expire. |
 | `intercept` | Wrap a function to capture its arguments and return values, then restore the original. Captures auto expire. |
 | `react` | Inspect the React tree and DOM. Query elements, walk fibers up or down, read props, state, hooks, and contexts, and bridge an on-screen element to its source module. |
-| `intl` | Discord intl system. Hash a key, reverse a hash, search by message text, scan a module for hashes, and list the modules that use a key. |
-| `discord` | Discord context and utilities. Current user, channel, and guild, REST calls, snowflake decoding, API endpoints, common modules, enums, constants, and design tokens. |
-| `patch` | Validate patches. Check find uniqueness, scan every plugin for broken patches, score pattern quality, list finder specs, and report modules patched by more than one plugin. |
+| `intl` | Discord intl system. Hash a key, reverse a hash, search by message text, scan a module for hashes, and list the modules that use a key. Recover key names for unmapped hashes from live messages; recovered keys persist to disk and reload on startup. |
+| `discord` | Discord context and utilities. Current user, channel, and guild, REST calls, snowflake decoding, API endpoints, common modules, enums, constants, design tokens, build info, and registered experiments. |
+| `patch` | Validate patches. Check find uniqueness, scan every plugin for broken patches, score pattern quality, list finder specs, and report modules patched by more than one plugin. Suggest fresh durable finds and a repaired match for a broken patch (`suggestFix`), and verify that a plugin's patches actually applied (`verifyApplied`). |
 | `testPatch` | Dry run a single patch before writing it. Checks find uniqueness, the match regex, capture groups, a replacement preview, and post replace syntax. |
 | `plugin` | Manage plugins. List with status, enable, disable, toggle, and read or update settings. |
+| `console` | Renderer console ring buffer: recent errors and warnings, uncaught errors, and unhandled rejections. Check after a reload or a patch change. |
+| `batch` | Run up to ten read-only tool calls in one round-trip, with per-call error isolation. Mutating actions are rejected per call. |
 | `evaluateCode` | Run JavaScript in the Discord renderer and return the last expression. For cases with no dedicated tool. |
 | `reloadDiscord` | Reload the Discord renderer. The next request waits for it to become ready. |
 
@@ -63,13 +65,19 @@ If the client does not see the server, start Discord first so the server is list
 
 The plugin has two halves. The main process runs the HTTP server, queues incoming requests, and applies a per-tool timeout. The renderer poll loop pulls each request, runs the tool against the live webpack and React runtime, and returns the result. All tool logic lives in the renderer because that is where the Discord internals are.
 
+Find generation lives in `finds/`: a hand-rolled JS tokenizer feeds a run enumerator that drops minified names and require or import spans, a durability scorer ranks the survivors, and a match repairer diagnoses and widens or strips broken patch matches under fixed step budgets so it degrades to "unrepaired" instead of hanging. That core has its own unit tests.
+
 Requests never leave the machine. The server binds to `127.0.0.1` and rejects any non-local origin.
+
+## Skill package
+
+`skills/discord-modding/` bundles agent-facing docs for driving these tools: a `SKILL.md` quickstart plus reference files for the patch-authoring workflow, find generation, patch repair, the intl system, runtime introspection, module discovery, power combos, and a tables reference. Point an MCP client's skill loader at that directory.
 
 ## Notes
 
 - The server runs only while Discord is open. Reloading the renderer keeps the server alive. Changes to the main process require a full Discord restart.
 - Every tool response carries both a text block and structured content, so a client can read either form.
-- The intl reverse map ships in `map/key_map.json`. Keys that are not in that map and are not referenced by name in loaded code cannot be reversed and stay as raw 6-character hashes.
+- The intl reverse map ships in `map/key_map.json`. Keys that are not in that map and are not referenced by name in loaded code cannot be reversed and stay as raw 6-character hashes. `intl recover` reconstructs many of these from live messages by hashing candidate key names and proving the match; recovered keys are cached to disk and reload on the next start.
 
 ## License
 
