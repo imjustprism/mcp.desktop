@@ -162,6 +162,7 @@ export const LIMITS = {
         DURATION_MAX_MS: 60_000,
         MAX_CAPTURES_DEFAULT: 100,
         MAX_CAPTURES_CAP: 500,
+        GRACE_MS: 60_000,
     },
     INTERCEPT: {
         SUMMARIZE_ARGS: 300,

@@ -537,18 +537,23 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
 
         const errors = recentConsole("error", 120_000, 20);
         const applied = results.filter(r => r.status === "APPLIED").length;
+        const findDead = results.filter(r => r.status === "FIND_DEAD").length;
         const verdict = !enabled ? "PLUGIN_DISABLED"
             : results.length === 0 ? "NO_PATCHES"
             : applied === results.length ? "ALL_APPLIED"
+            : applied + findDead === results.length ? "APPLIED_WHERE_LOADED"
             : "INCOMPLETE";
         return {
             plugin: resolvedName,
             enabled,
             patchCount: results.length,
             applied,
+            findDead: findDead || undefined,
             verdict,
             note: !enabled
                 ? "Plugin is disabled. Its patches are not registered, so NOT_APPLIED per patch is expected and does not indicate breakage."
+                : findDead && verdict !== "ALL_APPLIED"
+                ? "FIND_DEAD can mean the target module is in a lazy chunk not loaded this session, not necessarily a broken find. Open the relevant UI and re-verify to confirm."
                 : undefined,
             ambientConsoleErrorsLast2Min: errors.length,
             ambientErrorsNote: errors.length

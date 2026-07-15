@@ -613,7 +613,25 @@ export function cleanupTrace(id: number): boolean {
     return true;
 }
 
-export const cleanupExpiredTraces = () => expireAll(traceState.active, cleanupTrace);
+export function endTrace(id: number): boolean {
+    const trace = traceState.active.get(id);
+    if (!trace || trace.endedAt) return false;
+    trace.unsub?.();
+    trace.unsub = null;
+    trace.endedAt = Date.now();
+    return true;
+}
+
+export function cleanupExpiredTraces(): void {
+    const now = Date.now();
+    for (const [id, t] of traceState.active) {
+        if (t.endedAt) {
+            if (now >= t.endedAt + LIMITS.TRACE.GRACE_MS) cleanupTrace(id);
+        } else if (now >= t.expiresAt) {
+            endTrace(id);
+        }
+    }
+}
 export const cleanupAllTraces = () => cleanAll(traceState.active, cleanupTrace);
 
 export function cleanupModuleWatch(id: number): boolean {

@@ -55,7 +55,7 @@ export async function handleTrace(args: TraceToolArgs): Promise<ToolResult> {
                 const ts = Date.now();
                 const expired: number[] = [];
                 for (const [tid, t] of u.traceState.active) {
-                    if (t.isStoreTrace) continue;
+                    if (t.isStoreTrace || t.endedAt) continue;
                     if (ts >= t.expiresAt) { expired.push(tid); continue; }
                     if (t.captures.length >= t.maxCaptures) continue;
                     if (t.filter && !t.filter.test(fluxAction.type)) continue;
@@ -64,7 +64,7 @@ export async function handleTrace(args: TraceToolArgs): Promise<ToolResult> {
                     const hasData = Object.values(payload).some(v => v != null && !(Array.isArray(v) && !v.length));
                     t.captures.push(hasData ? { ts, type, data: payload } : { ts, type });
                 }
-                for (const tid of expired) u.cleanupTrace(tid);
+                for (const tid of expired) u.endTrace(tid);
                 return false;
             };
             dispatcher.addInterceptor(interceptor);
@@ -84,6 +84,7 @@ export async function handleTrace(args: TraceToolArgs): Promise<ToolResult> {
                 maxCaptures: t.maxCaptures,
                 elapsed: Date.now() - t.startedAt,
                 remaining: u.remainingMs(t.expiresAt),
+                ended: t.endedAt ? true : undefined,
             }));
             return { activeTraces: traces.length, traces };
         }
@@ -98,13 +99,16 @@ export async function handleTrace(args: TraceToolArgs): Promise<ToolResult> {
             id: traceId,
             captureCount: trace.captures.length,
             remaining,
+            ended: trace.endedAt ? true : undefined,
             ...summary,
         };
     }
 
     if (action === "stop") {
         if (traceId === undefined) return u.stopAllResult(u.traceState.active, u.cleanupAllTraces);
-        return u.stopOneResult(u.traceState.active, traceId, "Trace", u.cleanupTrace, c => summarizeCaptures(c, LIMITS.TRACE.STOP_CAPTURE_SLICE));
+        const wasEnded = u.traceState.active.get(traceId)?.endedAt !== undefined;
+        const result = u.stopOneResult(u.traceState.active, traceId, "Trace", u.cleanupTrace, c => summarizeCaptures(c, LIMITS.TRACE.STOP_CAPTURE_SLICE));
+        return wasEnded && !("error" in result) ? { ...result, ended: true } : result;
     }
 
     if (action === "store") {

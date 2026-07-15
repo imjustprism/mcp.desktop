@@ -75,7 +75,7 @@ const ENTRIES: ToolEntry[] = [
 ];
 
 const BATCHABLE: Readonly<Record<string, ReadonlySet<string> | "all">> = {
-    intl: "all",
+    intl: new Set(["hash", "reverse", "search", "scan", "targets"]),
     search: "all",
     graph: "all",
     resolve: "all",

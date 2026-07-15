@@ -81,6 +81,7 @@ export interface ActiveTrace extends TimedCapture {
     captures: TraceCapture[];
     unsub: (() => void) | null;
     isStoreTrace?: boolean;
+    endedAt?: number;
 }
 
 export interface ModuleWatch extends TimedCapture {

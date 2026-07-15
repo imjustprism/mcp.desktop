@@ -61,6 +61,7 @@ export async function handleDiscord(args: DiscordToolArgs): Promise<ToolResult> 
         }
         return {
             count: entries.length,
+            scope: "experiments registered by modules loaded this session, not the full catalog",
             experiments: entries.slice(0, LIMITS.DISCORD.ENUM_MATCHES * 4).map(([k, v]) => ({
                 id: k,
                 type: typeof v?.type === "string" ? v.type : undefined,
