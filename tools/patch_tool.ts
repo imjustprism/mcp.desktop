@@ -548,11 +548,11 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
             applied,
             verdict,
             note: !enabled
-                ? "Plugin is disabled — its patches are not registered, so NOT_APPLIED per patch is expected and does not indicate breakage."
+                ? "Plugin is disabled. Its patches are not registered, so NOT_APPLIED per patch is expected and does not indicate breakage."
                 : undefined,
             ambientConsoleErrorsLast2Min: errors.length,
             ambientErrorsNote: errors.length
-                ? "Renderer errors seen in the last 2 min. These are AMBIENT (from any plugin/tool, not attributed to this plugin's patches) and do not affect the verdict — use only as a weak follow-up signal."
+                ? "Renderer errors seen in the last 2 min. These are AMBIENT (from any plugin/tool, not attributed to this plugin's patches) and do not affect the verdict. Use only as a weak follow-up signal."
                 : undefined,
             recentErrors: errors.length ? errors.slice(-5).map(e => e.text.slice(0, 160)) : undefined,
             patches: results,
@@ -660,9 +660,9 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
         return {
             count: suggestions.length,
             note: "For each broken find, the target module is located and fresh durable unique finds are generated. Pass `match` to also diagnose the match regex against each candidate: matchRepair reports whether it still fits and, when repairable, a verified adjusted match (widened bounded gaps / stripped stale lookarounds).",
-            ...(matchInvalid && { matchWarning: "The provided `match` could not be parsed as a regex and was ignored; matchRepair was not computed. Pass it as /pattern/flags or a plain regex body." }),
+            ...(matchInvalid && { matchWarning: "The provided `match` could not be parsed as a regex and was ignored. matchRepair was not computed. Pass it as /pattern/flags or a plain regex body." }),
             ...(suggestions.length && !anyLocated && {
-                hint: "Could not relocate the target module. Relocation probes intl hashes, the full canonical find, and fragment/match-literal intersections — a find mutated INSIDE its single unique token (not just trailing junk) can defeat it. Try passing `match` too, or manually `search` for a surviving literal substring of the find.",
+                hint: "Could not relocate the target module. Relocation probes intl hashes, the full canonical find, and fragment/match-literal intersections. A find mutated INSIDE its single unique token (not just trailing junk) can defeat it. Try passing `match` too, or manually `search` for a surviving literal substring of the find.",
             }),
             suggestions
         };

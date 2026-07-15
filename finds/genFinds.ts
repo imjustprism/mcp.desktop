@@ -246,7 +246,7 @@ export function generateFinds(source: string, opts: GenFindsOptions = {}): GenFi
                     tier: left.durability <= right.durability ? left.tier : right.tier,
                     type: "pair",
                     regex: true,
-                    reasons: ["two stable fragments joined by a bounded gap — for modules with no unique single anchor"]
+                    reasons: ["two stable fragments joined by a bounded gap, for modules with no unique single anchor"]
                 });
                 if (++added >= MAX_PAIR_FINDS) break;
             }

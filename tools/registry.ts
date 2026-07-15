@@ -110,7 +110,7 @@ async function handleBatch(args: { calls?: BatchCall[] }): Promise<unknown> {
         const action = typeof callArgs.action === "string" ? callArgs.action : undefined;
         const allowed = BATCHABLE[tool];
         if (!allowed || (allowed !== "all" && !allowed.has(action ?? ""))) {
-            results.push({ tool, action: action ?? null, error: true, message: "not batchable — batch only accepts read-only tool/action combinations" });
+            results.push({ tool, action: action ?? null, error: true, message: "not batchable. Batch only accepts read-only tool/action combinations" });
             continue;
         }
         const handler = byName.get(tool)?.handler;

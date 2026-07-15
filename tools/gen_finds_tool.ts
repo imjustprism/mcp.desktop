@@ -64,7 +64,7 @@ export function handleGenFinds(args: ModuleToolArgs): ToolResult {
         candidateCount: candidates.length,
         uniqueCount: finds.filter(f => f.unique).length,
         uniquenessScope: "loaded-factories",
-        note: "Ranked by unique, then durability (build-stability, 0-10), then score. `score` is raw sequence weight (longer/denser = higher) and is NOT a quality measure — a high-score find can be a fragile one. Pick by `unique` + `durability`/`tier`. `uniquenessScope` is loaded factories only; a unique find can still collide with a lazy chunk (module.loadLazy first for lazy-heavy surfaces).",
+        note: "Ranked by unique, then durability (build-stability, 0-10), then score. `score` is raw sequence weight (longer/denser is higher), not a quality measure. A high-score find can be fragile. Pick by `unique` plus `durability`/`tier`. `uniquenessScope` is loaded factories only. A unique find can still collide with a lazy chunk (module.loadLazy first for lazy-heavy surfaces).",
         finds: finds.slice(0, limit)
     };
 }

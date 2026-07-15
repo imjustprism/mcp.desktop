@@ -56,7 +56,7 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "intl",
-        description: "Intl system. hash: key to hash. reverse: hash to key. search: find hashes by message text. scan: hashes in a module. targets: modules using a key. recover: reconstruct unmapped keys from live messages (hash-proven; learned keys persist to disk and reload on startup, self-validated against the current hash fn). clearCache: reset the hash to key cache. Use #{intl::KEY} in patches.",
+        description: "Intl system. hash: key to hash. reverse: hash to key. search: find hashes by message text. scan: hashes in a module. targets: modules using a key. recover: reconstruct unmapped keys from live messages (hash-proven, learned keys persist to disk and reload on startup, self-validated against the current hash fn). clearCache: reset the hash to key cache. Use #{intl::KEY} in patches.",
         inputSchema: {
             type: "object",
             properties: {
@@ -87,7 +87,7 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "patch",
-        description: "Patch validation. unique: find matches 1 module. analyze: scan all plugins for broken patches. plugin: one plugin's patches+health. lint: pattern quality score. finds: validate webpack finders. conflicts: modules patched by multiple plugins. diff: patches targeting a module. broken: unconsumed patches. suggestFix: for broken patches (all, or one plugin via pluginName, or a single find), locate the module the stale find still partially matches and generate fresh durable unique replacement finds; pass match to also diagnose the match regex per candidate and return a verified adjusted match when repairable. verifyApplied: prove a plugin's patches actually took effect (per-patch APPLIED/NOT_APPLIED/FIND_DEAD status + source-change check + recent console errors).",
+        description: "Patch validation. unique: find matches 1 module. analyze: scan all plugins for broken patches. plugin: one plugin's patches+health. lint: pattern quality score. finds: validate webpack finders. conflicts: modules patched by multiple plugins. diff: patches targeting a module. broken: unconsumed patches. suggestFix: for broken patches (all, or one plugin via pluginName, or a single find), locate the module the stale find still partially matches and generate fresh durable unique replacement finds. Pass match to also diagnose the match regex per candidate and return a verified adjusted match when repairable. verifyApplied: prove a plugin's patches actually took effect (per-patch APPLIED/NOT_APPLIED/FIND_DEAD status + source-change check + recent console errors).",
         inputSchema: {
             type: "object",
             properties: {
