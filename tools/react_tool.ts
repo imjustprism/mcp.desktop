@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { FiberNode, FoundComponent, HookInfo, ReactFiber, ReactToolArgs, ToolResult, TreeNode } from "../types";
 import { COMPONENT_FIBER_TAGS, CSS_CLASS_CAPTURE_RE, FIBER_TAGS, LIMITS } from "./constants";
 import * as u from "./utils";

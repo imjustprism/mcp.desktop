@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { PluginOption, PluginToolArgs, ToolResult } from "../types";
 import { plugins, pluginSettings, startPlugin, stopPlugin } from "../webpack";
 import { LIMITS, OPTION_TYPE_NAMES } from "./constants";

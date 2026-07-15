@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { IntlToolArgs, ToolResult } from "../types";
 import { createIntlHashBracketRegex, createIntlHashDotRegex, DEFAULT_TOOL_LIMIT, INTL_HASH_FRAGMENT, INTL_HASH_FULL_RE, INTL_TARGETS_SCAN_CAP } from "./constants";
 import * as u from "./utils";

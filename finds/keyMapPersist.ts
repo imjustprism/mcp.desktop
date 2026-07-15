@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 export const MAX_PERSISTED_KEYS = 20_000;
 
 const HASH_RE = /^[A-Za-z0-9+/]{6}$/;

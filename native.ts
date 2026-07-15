@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { app, IpcMainInvokeEvent } from "electron";
 import { promises as fs } from "fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "http";

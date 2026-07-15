@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 export const INTL_HASH_FRAGMENT = "[A-Za-z0-9+/]{6}";
 export const INTL_HASH_FULL_RE = /^[A-Za-z0-9+/]{6}$/;
 

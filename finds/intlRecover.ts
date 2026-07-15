@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 const SUFFIXES: readonly string[] = [
     "LABEL", "TITLE", "DESCRIPTION", "TOOLTIP", "TOOLTIP_TEXT", "BUTTON", "BUTTON_LABEL",
     "PLACEHOLDER", "HEADER", "BODY", "TEXT", "SUBTITLE", "SUBTEXT", "SUBHEADER", "A11Y_LABEL",

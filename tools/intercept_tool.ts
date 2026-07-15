@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { FunctionIntercept, InterceptCapture, InterceptToolArgs, ToolResult } from "../types";
 import { LIMITS } from "./constants";
 import * as u from "./utils";

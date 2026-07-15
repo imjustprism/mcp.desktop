@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { plugins as vencordPlugins } from "@api/PluginManager";
 import { Settings } from "@api/Settings";
 import { factoryListeners, filters, findAll, findByPropsLazy, findStore, search, wreq } from "@webpack";
