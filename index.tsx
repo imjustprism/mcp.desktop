@@ -75,6 +75,21 @@ function objectResult(obj: unknown, isError?: boolean): ToolCallResult {
     return { content: [{ type: "text", text: serializeResult(obj) }], structuredContent: toStructuredContent(obj), isError };
 }
 
+function resultHasError(v: unknown): boolean {
+    return isObject(v) && (v as { error?: unknown }).error === true;
+}
+
+const MUTATING_ACTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
+    module: new Set(["loadLazy"]),
+    plugin: new Set(["enable", "disable", "toggle", "setSetting"]),
+};
+
+function isMutatingCall(name: string, action: string | undefined): boolean {
+    if (name === "reloadDiscord") return true;
+    const actions = MUTATING_ACTIONS[name];
+    return !!action && !!actions && actions.has(action);
+}
+
 function toast(message: string, type: string): void {
     Toasts.show({ id: Toasts.genId(), message, type });
 }
@@ -82,7 +97,8 @@ function toast(message: string, type: string): void {
 async function executeToolCall(name: string, args: Record<string, unknown>): Promise<ToolCallResult> {
     const cached = getCachedResult(name, args);
     if (cached !== null) {
-        return objectResult({ ...(cached as object), cached: true });
+        const result = { ...(cached as object), cached: true };
+        return objectResult(result, resultHasError(result));
     }
 
     const handler = HANDLERS.get(name);
@@ -94,11 +110,12 @@ async function executeToolCall(name: string, args: Record<string, unknown>): Pro
             return objectResult({ warning: `${name} returned no result`, args });
         }
         setCachedResult(name, args, result);
+        if (isMutatingCall(name, actionOf(args))) toolCache.clear();
         const text = serializeResult(result);
         if (!text || text === "null" || text === "undefined") {
             return objectResult({ warning: `${name} produced empty output`, args });
         }
-        return { content: [{ type: "text", text }], structuredContent: toStructuredContent(result) };
+        return objectResult(result, resultHasError(result));
     } catch (error) {
         const message = errMsg(error);
         return errorResult({ message, tool: name, args });

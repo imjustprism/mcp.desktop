@@ -323,6 +323,7 @@ export async function handleTestPatch(args: TestPatchToolArgs): Promise<ToolResu
     let matchIndex: number | null = null;
     let matchContext: string | null = null;
     let replacementPreview: string | null = null;
+    let replaceNoop = false;
     const matchWarnings: RegexWarning[] = [];
     let replaceWarnings: RegexWarning[] = [];
     let diagnostic: MatchDiagnostic | null = null;
@@ -340,7 +341,12 @@ export async function handleTestPatch(args: TestPatchToolArgs): Promise<ToolResu
             }
             if (replaceStr != null) {
                 replaceWarnings = validateReplace(replaceStr, captureGroups, regex.source);
-                replacementPreview = u.snippet(targetModule.replace(regex, replaceStr), matchIndex, replaceStr.length || 50, CONTEXT.REPLACEMENT_BEFORE, CONTEXT.REPLACEMENT_AFTER);
+                const replacedSource = targetModule.replace(regex, replaceStr);
+                replaceNoop = replacedSource === targetModule;
+                if (replaceNoop) {
+                    replaceWarnings.push({ rule: "replaceNoop", severity: "error", detail: "Replacement did not change the source." });
+                }
+                replacementPreview = u.snippet(replacedSource, matchIndex, replaceStr.length || 50, CONTEXT.REPLACEMENT_BEFORE, CONTEXT.REPLACEMENT_AFTER);
                 replaceWarnings.push(...checkSyntaxAfterReplace(targetModule, regex, replaceStr));
             }
         } else {
@@ -356,6 +362,7 @@ export async function handleTestPatch(args: TestPatchToolArgs): Promise<ToolResu
     else if (!findUnique) verdict = "FIND_NOT_UNIQUE";
     else if (unsafePattern) verdict = "UNSAFE_PATTERN";
     else if (!matchWorks) verdict = "MATCH_FAILED";
+    else if (replaceNoop) verdict = "REPLACE_NOOP";
     else if (allWarnings.some(w => w.severity === "error")) verdict = "PASS_WITH_ERRORS";
     else if (allWarnings.some(w => w.severity === "warning")) verdict = "PASS_WITH_WARNINGS";
     else verdict = "PASS";

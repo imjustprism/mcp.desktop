@@ -20,7 +20,7 @@ function summarizeIntercept(captures: InterceptCapture[], limit: number) {
 }
 
 function interceptMeta(i: FunctionIntercept) {
-    return { id: i.id, moduleId: i.moduleId, exportKey: i.exportKey, captureCount: i.captures.length, remaining: u.remainingMs(i.expiresAt) };
+    return { id: i.id, moduleId: i.moduleId, exportKey: i.exportKey, captureCount: i.captures.length, remaining: u.remainingMs(i.expiresAt), ended: i.endedAt ? true : undefined };
 }
 
 export async function handleIntercept(args: InterceptToolArgs): Promise<ToolResult> {
@@ -102,7 +102,7 @@ export async function handleIntercept(args: InterceptToolArgs): Promise<ToolResu
 
         const wrapper = function (this: unknown, ...fnArgs: unknown[]) {
             if (Date.now() >= intercept.expiresAt) {
-                u.cleanupIntercept(id);
+                u.endIntercept(id);
             } else if (intercept.captures.length < intercept.maxCaptures) {
                 const capture: InterceptCapture = { ts: Date.now(), args: fnArgs };
                 try {
@@ -152,7 +152,9 @@ export async function handleIntercept(args: InterceptToolArgs): Promise<ToolResu
 
     if (action === "stop") {
         if (interceptId === undefined) return u.stopAllResult(u.interceptState.active, u.cleanupAllIntercepts);
-        return u.stopOneResult(u.interceptState.active, interceptId, "Intercept", u.cleanupIntercept, c => summarizeIntercept(c, LIMITS.INTERCEPT.STOP_CAPTURE_SLICE));
+        const wasEnded = u.interceptState.active.get(interceptId)?.endedAt !== undefined;
+        const result = u.stopOneResult(u.interceptState.active, interceptId, "Intercept", u.cleanupIntercept, c => summarizeIntercept(c, LIMITS.INTERCEPT.STOP_CAPTURE_SLICE));
+        return wasEnded && !("error" in result) ? { ...result, ended: true } : result;
     }
 
     return { error: true, message: "action: set, get, stop" };

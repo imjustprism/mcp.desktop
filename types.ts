@@ -104,6 +104,7 @@ export interface FunctionIntercept extends Pick<TimedCapture, "id" | "maxCapture
     methodParent?: Record<string, unknown>;
     original: AnyFn;
     captures: InterceptCapture[];
+    endedAt?: number;
 }
 
 export interface CacheEntry {

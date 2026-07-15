@@ -22,6 +22,7 @@ const CORS_PREFLIGHT_MAX_AGE_SECONDS = 86_400;
 const SERVER_KEEPALIVE_TIMEOUT_MS = 10_000;
 const SERVER_HEADERS_TIMEOUT_MS = 5_000;
 const SERVER_MAX_HEADERS = 20;
+const MAIN_TIMEOUT_SLACK_MS = 5_000;
 
 const enum RPCError {
     ParseError = -32700,
@@ -149,12 +150,12 @@ export function sendResponse(_event: IpcMainInvokeEvent, id: number, response: M
     entry.resolve(response);
 }
 
-export function startServer(): { ok: boolean; port: number } {
+export function startServer(): Promise<{ ok: boolean; port: number }> {
     clearPending("Server restarting");
 
-    if (server) return { ok: true, port: PORT };
+    if (server) return Promise.resolve({ ok: true, port: PORT });
 
-    server = createServer(async (req, res) => {
+    const srv = createServer(async (req, res) => {
         stats.requests++;
 
         const { origin } = req.headers;
@@ -210,6 +211,7 @@ export function startServer(): { ok: boolean; port: number } {
         const params = request.params as ToolCallParams | undefined;
         const action = params?.arguments?.action as string | undefined;
         const timeout = request.method === "tools/call" && params?.name ? getToolTimeout(params.name, action) : DEFAULT_TIMEOUT_MS;
+        const mainTimeout = timeout + MAIN_TIMEOUT_SLACK_MS;
 
         const response = await new Promise<MCPResponse | null>(resolve => {
             pending.set(id, {
@@ -218,19 +220,21 @@ export function startServer(): { ok: boolean; port: number } {
                 timer: setTimeout(() => {
                     if (!pending.has(id)) return;
                     pending.delete(id);
+                    const queueIdx = requestQueue.findIndex(q => q.id === id);
+                    if (queueIdx >= 0) requestQueue.splice(queueIdx, 1);
                     stats.timeouts++;
 
                     const tool = params?.name ?? request.method;
                     const detail = action ? `${tool}:${action}` : tool;
 
                     resolve(
-                        makeError(request.id ?? null, RPCError.Timeout, `${detail} did not respond within ${Math.round(timeout / 1000)}s. The renderer may be blocked or the operation is too expensive.`, {
+                        makeError(request.id ?? null, RPCError.Timeout, `${detail} did not respond within ${Math.round(mainTimeout / 1000)}s. The renderer may be blocked or the operation is too expensive.`, {
                             tool,
                             action: action ?? null,
-                            timeoutMs: timeout,
+                            timeoutMs: mainTimeout,
                         }),
                     );
-                }, timeout),
+                }, mainTimeout),
             });
 
             requestQueue.push({ id, request, priority });
@@ -246,27 +250,44 @@ export function startServer(): { ok: boolean; port: number } {
         }
     });
 
-    server.keepAliveTimeout = SERVER_KEEPALIVE_TIMEOUT_MS;
-    server.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
-    server.maxHeadersCount = SERVER_MAX_HEADERS;
-    server.timeout = 0;
+    srv.keepAliveTimeout = SERVER_KEEPALIVE_TIMEOUT_MS;
+    srv.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
+    srv.maxHeadersCount = SERVER_MAX_HEADERS;
+    srv.timeout = 0;
 
-    server.on("error", (err: NodeJS.ErrnoException) => {
+    srv.on("error", (err: NodeJS.ErrnoException) => {
         console.error("[mcp]", err.code === "EADDRINUSE" ? `Port ${PORT} already in use` : err.message);
     });
 
-    server.on("listening", () => {
-        stats.startedAt = Date.now();
-    });
+    server = srv;
 
-    server.listen(PORT, HOST);
-    return { ok: true, port: PORT };
+    return new Promise(resolve => {
+        srv.once("listening", () => {
+            stats.startedAt = Date.now();
+            resolve({ ok: true, port: PORT });
+        });
+
+        srv.once("error", () => {
+            server = null;
+            resolve({ ok: false, port: PORT });
+        });
+
+        srv.listen(PORT, HOST);
+    });
 }
 
-export function stopServer(): { ok: boolean } {
+export async function stopServer(): Promise<{ ok: boolean }> {
     clearPending("Server stopped");
-    server?.close();
+    const srv = server;
     server = null;
+    if (srv) {
+        srv.closeIdleConnections();
+        srv.closeAllConnections();
+        await new Promise<void>(resolve => {
+            const done = setTimeout(resolve, 3000);
+            srv.close(() => { clearTimeout(done); resolve(); });
+        });
+    }
     return { ok: true };
 }
 

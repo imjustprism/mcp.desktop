@@ -216,6 +216,12 @@ export function parsePublicExports(id: string): Record<string, string> {
 export function countModuleMatches(str: string, earlyExit = 10): number {
     if (!str || str.length < 3) return 0;
 
+    const now = Date.now();
+    if (now - batchCacheTime > CACHE_TTL.BATCH_COUNT_MS) {
+        batchResultsCache.clear();
+        batchCacheTime = now;
+    }
+
     const cached = batchResultsCache.get(str);
     if (cached && cached.count < cached.scannedTo) return Math.min(cached.count, earlyExit);
 
@@ -564,11 +570,7 @@ export function snippet(source: string, idx: number, matchLen: number, before = 
     return source.slice(Math.max(0, idx - before), Math.min(source.length, idx + matchLen + after));
 }
 
-export function cleanupIntercept(id: number): boolean {
-    const intercept = interceptState.active.get(id);
-    if (!intercept) return false;
-    invalidateIdentityIndex();
-
+function restoreIntercept(intercept: FunctionIntercept): void {
     const { methodKey, methodParent, exportKey, original } = intercept;
     try {
         if (methodKey && methodParent) {
@@ -582,6 +584,22 @@ export function cleanupIntercept(id: number): boolean {
     } catch {
 
     }
+}
+
+export function endIntercept(id: number): boolean {
+    const intercept = interceptState.active.get(id);
+    if (!intercept || intercept.endedAt) return false;
+    invalidateIdentityIndex();
+    restoreIntercept(intercept);
+    intercept.endedAt = Date.now();
+    return true;
+}
+
+export function cleanupIntercept(id: number): boolean {
+    const intercept = interceptState.active.get(id);
+    if (!intercept) return false;
+    invalidateIdentityIndex();
+    restoreIntercept(intercept);
     interceptState.active.delete(id);
     return true;
 }
@@ -594,7 +612,16 @@ function cleanAll<T>(map: Map<number, T>, cleanup: (id: number) => void): void {
     for (const id of [...map.keys()]) cleanup(id);
 }
 
-export const cleanupExpiredIntercepts = () => expireAll(interceptState.active, cleanupIntercept);
+export function cleanupExpiredIntercepts(): void {
+    const now = Date.now();
+    for (const [id, i] of interceptState.active) {
+        if (i.endedAt) {
+            if (now >= i.endedAt + LIMITS.INTERCEPT.GRACE_MS) cleanupIntercept(id);
+        } else if (now >= i.expiresAt) {
+            endIntercept(id);
+        }
+    }
+}
 export const cleanupAllIntercepts = () => cleanAll(interceptState.active, cleanupIntercept);
 
 export function cleanupTrace(id: number): boolean {

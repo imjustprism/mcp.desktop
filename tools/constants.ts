@@ -176,6 +176,7 @@ export const LIMITS = {
         MAX_CAPTURES_DEFAULT: 50,
         MAX_CAPTURES_CAP: 200,
         EXPORT_OBJECTS_SLICE: 5,
+        GRACE_MS: 60_000,
     },
     CSS: {
         MAX_CLASSES_PER_MODULE: 100,
