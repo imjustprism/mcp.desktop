@@ -5,7 +5,7 @@
  */
 
 import { type DurabilityTier, scoreDurability } from "./durability";
-import { type Token, tokenize, tokenText } from "./tokenizer";
+import { type Token, tokenize } from "./tokenizer";
 
 export type Span = readonly [start: number, end: number];
 
@@ -30,27 +30,16 @@ export interface GenFindsOptions {
     maxPairGap?: number;
 }
 
-const DEFAULT_MIN_SCORE = 8;
 const DEFAULT_LIMIT = 100;
 const MAX_FIND_LEN = 400;
-const MAX_MINIFIED_IDENT_LEN = 4;
+const MIN_CONTENT_SCORE = 6;
+const MIN_STABLE_IDENT_LEN = 4;
 const DEFAULT_MAX_PAIR_GAP = 60;
 const PAIR_GAP_SLACK = 10;
 const MAX_PAIR_FINDS = 24;
 const MAX_PAIR_ATTEMPTS = 4000;
 
 const MODULE_HEADER_RE = /^0,(?:function)?\(\w+,\w+,(\w+)\)/;
-
-const FULL_WEIGHT_KEYWORDS: ReadonlySet<string> = new Set([
-    "null", "void", "typeof", "for", "new", "instanceof", "delete"
-]);
-const STRUCTURAL_PUNCT: ReadonlySet<string> = new Set([
-    "(", ")", "[", "]", "{", "}", ",", ".", ";", "=>"
-]);
-
-function ilog2(x: number): number {
-    return x < 1 ? 0 : Math.floor(Math.log2(x));
-}
 
 function escapeRe(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -110,55 +99,49 @@ function makeOverlapsBadSpan(spans: readonly Span[]): (start: number, end: numbe
     };
 }
 
-function survivesMinification(t: Token): boolean {
-    if (t.kind === "ident") return t.end - t.start > MAX_MINIFIED_IDENT_LEN;
-    return true;
-}
-
 function isContentToken(t: Token): boolean {
     return t.kind === "ident" || t.kind === "str" || t.kind === "template" || t.kind === "regex";
 }
 
-function scoreRun(source: string, run: Token[]): number {
-    let score = run[run.length - 1].end - run[0].start;
-    for (const t of run) {
-        const tl = t.end - t.start;
-        switch (t.kind) {
-            case "ident":
-            case "str":
-            case "template":
-            case "regex":
-                score += tl * ilog2(tl);
-                break;
-            case "number":
-                score += Math.min(tl * ilog2(tl), 1);
-                break;
-            case "keyword": {
-                const kw = tokenText(source, t);
-                if (kw === "return" || kw === "function") score += Math.floor(kw.length / 2);
-                else if (FULL_WEIGHT_KEYWORDS.has(kw)) score += kw.length;
-                else score += 1;
-                break;
-            }
-            case "punct":
-                score += STRUCTURAL_PUNCT.has(tokenText(source, t)) ? 0 : 1;
-                break;
-            default:
-                t.kind satisfies never;
-        }
-    }
-    return score;
+function isStableToken(
+    source: string,
+    tokens: readonly Token[],
+    i: number,
+    overlapsBadSpan: (start: number, end: number) => boolean
+): boolean {
+    const t = tokens[i];
+    if (overlapsBadSpan(t.start, t.end)) return false;
+    if (t.kind !== "ident") return true;
+    if (t.end - t.start >= MIN_STABLE_IDENT_LEN) return true;
+    const prev = tokens[i - 1];
+    return prev !== undefined && prev.kind === "punct" && source[prev.start] === ".";
 }
 
-function isRejectedLoneRun(source: string, run: Token[]): boolean {
-    if (run.length !== 1) return false;
-    const t = run[0];
-    if (t.kind === "punct") return true;
-    if (t.kind === "keyword") {
-        const kw = tokenText(source, t);
-        return kw === "extends" || kw === "let" || kw === "var" || kw === "const";
+function segmentStableRuns(
+    source: string,
+    tokens: readonly Token[],
+    overlapsBadSpan: (start: number, end: number) => boolean
+): Array<[number, number]> {
+    const runs: Array<[number, number]> = [];
+    let open = -1;
+    for (let i = 0; i <= tokens.length; i++) {
+        if (i < tokens.length && isStableToken(source, tokens, i, overlapsBadSpan)) {
+            if (open < 0) open = i;
+        } else if (open >= 0) {
+            runs.push([open, i]);
+            open = -1;
+        }
     }
-    return false;
+    return runs;
+}
+
+function contentWeight(tokens: readonly Token[], lo: number, hi: number): number {
+    let weight = 0;
+    for (let k = lo; k < hi; k++) {
+        const t = tokens[k];
+        if (isContentToken(t)) weight += t.end - t.start;
+    }
+    return weight;
 }
 
 const INTL_DOT_RE = /\.t\.([A-Za-z0-9+/]{6})(?![A-Za-z0-9+/])/g;
@@ -180,7 +163,7 @@ function collectIntlFinds(source: string, hashToKey: GenFindsOptions["hashToKey"
 }
 
 export function generateFinds(source: string, opts: GenFindsOptions = {}): GenFind[] {
-    const minScore = opts.minScore ?? DEFAULT_MIN_SCORE;
+    const minScore = opts.minScore ?? MIN_CONTENT_SCORE;
     const limit = opts.limit ?? DEFAULT_LIMIT;
     const requireParam = opts.requireParam ?? detectRequireParam(source);
 
@@ -197,29 +180,18 @@ export function generateFinds(source: string, opts: GenFindsOptions = {}): GenFi
         candidates.push(f);
     }
 
-    let run: Token[] = [];
-    const flush = () => {
-        const cs = run;
-        run = [];
-        if (cs.length === 0) return;
-        if (isRejectedLoneRun(source, cs)) return;
-        if (!cs.some(isContentToken)) return;
-        const score = scoreRun(source, cs);
-        if (score < minScore) return;
-        const find = source.slice(cs[0].start, cs[cs.length - 1].end);
-        if (find.length > MAX_FIND_LEN) return;
-        if (seen.has(find)) return;
+    for (const [lo, hi] of segmentStableRuns(source, tokens, overlapsBadSpan)) {
+        const score = contentWeight(tokens, lo, hi);
+        if (score < minScore) continue;
+        const start = tokens[lo].start;
+        const end = tokens[hi - 1].end;
+        const find = source.slice(start, end);
+        if (find.length > MAX_FIND_LEN || seen.has(find)) continue;
         seen.add(find);
         const dur = scoreDurability(find);
         candidates.push({ find, score, durability: dur.score, tier: dur.tier, type: "sequence", reasons: dur.reasons });
-        runSpans.push({ find, start: cs[0].start, end: cs[cs.length - 1].end, durability: dur.score, tier: dur.tier, score });
-    };
-
-    for (const t of tokens) {
-        if (survivesMinification(t) && !overlapsBadSpan(t.start, t.end)) run.push(t);
-        else flush();
+        runSpans.push({ find, start, end, durability: dur.score, tier: dur.tier, score });
     }
-    flush();
 
     if (opts.synthesizePairs && runSpans.length >= 2) {
         const maxGap = opts.maxPairGap ?? DEFAULT_MAX_PAIR_GAP;
