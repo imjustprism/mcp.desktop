@@ -6,6 +6,7 @@
 
 import { PluginNative } from "@utils/types";
 
+import { resolveRefs } from "../finds/refPath";
 import { MCPTool } from "../types";
 import { handleConsole } from "./console_tool";
 import { TOOLS as TOOL_DEFS } from "./definitions";
@@ -83,7 +84,7 @@ const BATCHABLE: Readonly<Record<string, ReadonlySet<string> | "all">> = {
     react: "all",
     patch: "all",
     console: new Set(["recent", "stats"]),
-    module: new Set(["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "suggest", "genFinds", "annotate", "css", "explain"]),
+    module: new Set(["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "suggest", "genFinds", "fingerprint", "annotate", "css", "explain"]),
     store: new Set(["find", "list", "state", "snapshot", "links"]),
     flux: new Set(["events", "listeners", "graph", "producers", "chain"]),
     discord: new Set(["context", "snowflake", "endpoints", "common", "enum", "constants", "tokens", "buildInfo", "experiments"]),
@@ -104,24 +105,28 @@ async function handleBatch(args: { calls?: BatchCall[] }): Promise<unknown> {
     const dropped = all.length - calls.length;
 
     const results: unknown[] = [];
+    const priorResults: unknown[] = [];
+    const record = (entry: unknown, prior: unknown) => { results.push(entry); priorResults.push(prior); };
+
     for (const call of calls) {
         const tool = call?.tool ?? "";
-        const callArgs = call?.args ?? {};
+        const callArgs = resolveRefs(call?.args ?? {}, priorResults);
         const action = typeof callArgs.action === "string" ? callArgs.action : undefined;
-        const allowed = BATCHABLE[tool];
+        const allowed = Object.hasOwn(BATCHABLE, tool) ? BATCHABLE[tool] : undefined;
         if (!allowed || (allowed !== "all" && !allowed.has(action ?? ""))) {
-            results.push({ tool, action: action ?? null, error: true, message: "not batchable. Batch only accepts read-only tool/action combinations" });
+            record({ tool, action: action ?? null, error: true, message: "not batchable. Batch only accepts read-only tool/action combinations" }, null);
             continue;
         }
         const handler = byName.get(tool)?.handler;
         if (!handler) {
-            results.push({ tool, error: true, message: `Unknown tool: ${tool}` });
+            record({ tool, error: true, message: `Unknown tool: ${tool}` }, null);
             continue;
         }
         try {
-            results.push({ tool, action: action ?? null, result: await handler(callArgs) });
+            const result = await handler(callArgs);
+            record({ tool, action: action ?? null, result }, result);
         } catch (e) {
-            results.push({ tool, action: action ?? null, error: true, message: e instanceof Error ? e.message : String(e) });
+            record({ tool, action: action ?? null, error: true, message: e instanceof Error ? e.message : String(e) }, null);
         }
     }
     return {

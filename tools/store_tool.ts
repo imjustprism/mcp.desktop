@@ -91,6 +91,7 @@ export async function handleStore(args: StoreToolArgs): Promise<ToolResult> {
 
     if (action === "links") {
         const cc = store._changeCallbacks as { listeners?: { size?: number }; conditionalListeners?: { size?: number } } | undefined;
+        const rcc = store._reactChangeCallbacks as { listeners?: { size?: number } } | undefined;
         const syncWiths = store._syncWiths as Array<{ store?: { getName?: () => string } }> | undefined;
         const syncsWith = (syncWiths ?? []).map(sw => u.safeCall(() => sw?.store?.getName?.() ?? "?", "?"));
         return {
@@ -98,9 +99,12 @@ export async function handleStore(args: StoreToolArgs): Promise<ToolResult> {
             dispatchToken: store._dispatchToken as string | undefined,
             syncsWith,
             listenerCount: cc?.listeners?.size ?? 0,
+            reactListenerCount: rcc?.listeners?.size ?? 0,
             conditionalListenerCount: cc?.conditionalListeners?.size ?? 0,
         };
     }
+
+    if ((action === "call" || action === "state") && !method) return u.missingArg("method");
 
     if ((action === "call" || action === "state") && method) {
         const storeProto = u.safeProto(store);

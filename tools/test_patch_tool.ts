@@ -401,7 +401,7 @@ export async function handleTestPatch(args: TestPatchToolArgs): Promise<ToolResu
     }
 
     let multiMatchResults: Array<{ id: string; matchWorks: boolean; matchedText?: string }> | undefined;
-    if (!findUnique && moduleMatches.length > 1) {
+    if (!findUnique && moduleMatches.length > 1 && !unsafePattern) {
         multiMatchResults = moduleMatches.slice(0, LIMITS.TEST_PATCH.MULTI_MATCH_SLICE).map(m => {
             const src = u.getModuleSource(m.id);
             const result = src.match(regex);

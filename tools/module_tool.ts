@@ -7,6 +7,7 @@
 import { loadLazyChunks } from "@debug/loadLazyChunks";
 import { canonicalizeMatch } from "@utils/patches";
 
+import { fingerprintModule } from "../finds/moduleFingerprint";
 import { AnchorCandidate, ModuleMatch, ModuleToolArgs, ModuleWatch, SuggestCandidate, ToolResult, WebpackExport } from "../types";
 import { factoryListeners, filters, Flux, getCommonModules, wreq } from "../webpack";
 import {
@@ -54,8 +55,8 @@ const moduleMatchBase = (m: ModuleMatch, i: number) => ({ index: i, moduleId: m.
 
 export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
     const { action, id, props, code, displayName, className, exportName, exportValue, pattern } = args;
-    if (args.limit === 0) return { error: true, message: "limit must be >= 1 (omit for default)" };
-    if (args.maxLength === 0) return { error: true, message: "maxLength must be >= 1 (omit for default)" };
+    if (args.limit != null && args.limit < 1) return { error: true, message: "limit must be >= 1 (omit for default)" };
+    if (args.maxLength != null && args.maxLength < 1) return { error: true, message: "maxLength must be >= 1 (omit for default)" };
     const limit = args.limit ?? DEFAULT_TOOL_LIMIT;
     const maxLength = Math.min(args.maxLength ?? LIMITS.MODULE.SOURCE_MAXLENGTH_DEFAULT, LIMITS.MODULE.SOURCE_MAXLENGTH_CAP);
 
@@ -266,8 +267,8 @@ export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
         const intlKeys = [...u.iterIntlHashes(src)].slice(0, LIMITS.MODULE.STRUCTURE_MAX_STRINGS).map(h => u.intlFind(h.hash, h.key));
         const stores = [...new Set([...src.matchAll(/\b([A-Z]\w+Store)\b/g)].map(mm => mm[1]))].slice(0, LIMITS.MODULE.STRUCTURE_VARIABLES_OUT);
         const dispatches = [...new Set([...src.matchAll(/type:"([A-Z][A-Z0-9_]+)"/g)].map(mm => mm[1]))].slice(0, LIMITS.MODULE.STRUCTURE_VARIABLES_OUT);
-        const isComponent = /\.jsxs?\(/.test(src) || (/\.createElement\(/.test(src) && !/document\.createElement/.test(src));
-        const role = /registerStore|extends\s+\w+\.Store/.test(src) || stores.some(s => src.includes(`class ${s}`))
+        const isComponent = /\.jsxs?[()]/.test(src) || (/\.createElement\(/.test(src) && !/document\.createElement/.test(src));
+        const role = /registerStore|extends\s+[\w.]+\.Store\b/.test(src) || stores.some(s => src.includes(`class ${s}`))
             ? "store"
             : isComponent
               ? "component"
@@ -358,6 +359,8 @@ export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
         };
     }
 
+    if (action === "extract" && !id) return u.missingArg("id");
+
     if (id && (action === "extract" || !action)) {
         if (!wreq.m[id]) return u.moduleNotFound(id);
         const source = u.extractModule(id, args.patched !== false);
@@ -390,7 +393,8 @@ export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
         }
 
         const patchedBy = u.getModulePatchedBy(id);
-        return { found: true, id, hint: u.getModuleHint(id), patchedBy: patchedBy.length ? patchedBy : undefined, hasDefault: "default" in exp, exportCount: Object.keys(exp).length, exports };
+        const isObj = typeof exp === "object" && exp !== null;
+        return { found: true, id, hint: u.getModuleHint(id), patchedBy: patchedBy.length ? patchedBy : undefined, hasDefault: isObj && "default" in exp, exportCount: Object.keys(exp).length, exports };
     }
 
     if (action === "context") {
@@ -480,7 +484,8 @@ export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
             if (changes.length >= LIMITS.MODULE.DIFF_MAX_REGIONS) break;
         }
 
-        return { found: true, id, hasPatches: true, patchedBy, originalSize: original.length, patchedSize: patchedClean.length, changeCount: changes.length, changes };
+        const changesTruncated = changes.length >= LIMITS.MODULE.DIFF_MAX_REGIONS;
+        return { found: true, id, hasPatches: true, patchedBy, originalSize: original.length, patchedSize: patchedClean.length, changeCount: changes.length, truncated: changesTruncated ? true : undefined, note: changesTruncated ? `Showing the first ${LIMITS.MODULE.DIFF_MAX_REGIONS} change regions, there may be more later in the module` : undefined, changes };
     }
 
     if (props?.length) {
@@ -722,15 +727,25 @@ export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
 
     if (action === "genFinds") return handleGenFinds(args);
 
+    if (action === "fingerprint") {
+        if (!id) return u.missingArg("id");
+        const source = u.getModuleSource(id);
+        if (!source) return u.moduleNotFound(id);
+        const fp = fingerprintModule(source);
+        return { id, ...fp, note: "Build-stable landmark fingerprint (intl keys, store names, error strings, css hashes) for cross-build module identity" };
+    }
+
     if (action === "suggest") {
         if (!id) return u.missingArg("id");
         const source = u.getModuleSource(id);
         if (!source) return u.moduleNotFound(id);
 
+        const MAX_SUGGEST_CANDIDATES = 250;
         const candidates: SuggestCandidate[] = [];
         const seen = new Set<string>();
 
         const addCandidate = (find: string, searchStr: string, type: string, intlKey?: string) => {
+            if (candidates.length >= MAX_SUGGEST_CANDIDATES) return;
             if (seen.has(find) || find.length < LIMITS.MODULE.SUGGEST_MIN_FIND_LEN) return;
             seen.add(find);
             const count = u.countModuleMatches(searchStr, 3);

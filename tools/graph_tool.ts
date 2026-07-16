@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { detectRequireParam } from "../finds/genFinds";
+import { extractSymbolUsage, findRequireBindings } from "../finds/symbolUsage";
 import { GraphToolArgs, ToolResult } from "../types";
 import { DEFAULT_TOOL_LIMIT } from "./constants";
 import * as u from "./utils";
+
+const USEDBY_SCAN_CAP = 300;
 
 function bfsPath(graph: Map<string, string[]>, from: string, to: string, maxDepth: number): string[] | null {
     if (from === to) return [from];
@@ -67,5 +71,52 @@ export async function handleGraph(args: GraphToolArgs): Promise<ToolResult> {
         return { id, nodeCount: nodes.size, nodes: [...nodes].map(node), edges, truncated: queue.length > 0 ? true : undefined };
     }
 
-    return { error: true, message: "action: imports, importedBy, path, neighborhood, exports" };
+    if (action === "usedBy") {
+        const importers = reverse.get(id) ?? [];
+        if (!importers.length) return { id, importerCount: 0, symbols: [], note: "No loaded module imports this one" };
+        const publicExports = u.parsePublicExports(id);
+        const exportKeys = new Set(Object.keys(publicExports));
+        const byProp = new Map<string, Array<{ id: string; count: number }>>();
+        let scanned = 0;
+        for (const imp of importers.slice(0, USEDBY_SCAN_CAP)) {
+            const src = u.getModuleSource(imp);
+            if (!src) continue;
+            const rp = detectRequireParam(src);
+            if (!rp) continue;
+            const bindings = findRequireBindings(src, rp, id);
+            if (!bindings.length) continue;
+            scanned++;
+            for (const use of extractSymbolUsage(src, bindings)) {
+                if (exportKeys.size) {
+                    if (!exportKeys.has(use.prop)) continue;
+                } else if (use.prop.length <= 1) {
+                    continue;
+                }
+                let list = byProp.get(use.prop);
+                if (!list) byProp.set(use.prop, list = []);
+                list.push({ id: imp, count: use.count });
+            }
+        }
+        const symbols = [...byProp.entries()]
+            .map(([exp, users]) => ({
+                export: exp,
+                importerCount: users.length,
+                totalUses: users.reduce((a, b) => a + b.count, 0),
+                usedBy: users.sort((a, b) => b.count - a.count).slice(0, limit).map(x => ({ ...node(x.id), count: x.count })),
+            }))
+            .sort((a, b) => b.importerCount - a.importerCount || b.totalUses - a.totalUses)
+            .slice(0, limit);
+        return {
+            id,
+            importerCount: importers.length,
+            scannedImporters: scanned,
+            truncated: importers.length > USEDBY_SCAN_CAP ? true : undefined,
+            exportsResolved: exportKeys.size > 0,
+            note: exportKeys.size ? undefined : "This module's exports could not be resolved, so property attribution is unverified and may include unrelated locals",
+            publicExports,
+            symbols,
+        };
+    }
+
+    return { error: true, message: "action: imports, importedBy, path, neighborhood, exports, usedBy" };
 }

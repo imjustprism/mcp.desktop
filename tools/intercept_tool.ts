@@ -31,6 +31,8 @@ export async function handleIntercept(args: InterceptToolArgs): Promise<ToolResu
 
     u.cleanupExpiredIntercepts();
 
+    if (action === "set" && !moduleId) return u.missingArg("moduleId");
+
     if (action === "set" && moduleId) {
         const mod = u.moduleAt(moduleId);
         if (!mod?.exports) return u.moduleNotFound(moduleId);

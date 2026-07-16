@@ -47,6 +47,9 @@ export async function handleSearch(args: SearchToolArgs): Promise<ToolResult> {
         return { error: true, message: `Invalid regex: ${pattern}` };
     }
     if (regex) {
+        if (/\([^)]*[*+][^)]*\)[*+]/.test(regex.source)) {
+            return { error: true, code: "UNSAFE_PATTERN", message: "Pattern has a nested unbounded quantifier that can cause catastrophic backtracking and freeze the client. Rewrite with a bounded {0,N} or remove the outer quantifier" };
+        }
         const searchRegex = canonicalizeMatch(regex);
 
         const indexRegex = u.stripGlobal(searchRegex);

@@ -46,7 +46,7 @@ Example calls (tool name + args):
 ```json
 {"tool":"react","args":{"action":"source","selector":".message__abc12"}}
 {"tool":"module","args":{"action":"explain","id":"445123"}}
-{"tool":"module","args":{"action":"genFinds","id":"445123","requireUnique":true,"minScore":8}}
+{"tool":"module","args":{"action":"genFinds","id":"445123","requireUnique":true,"minScore":6}}
 {"tool":"testPatch","args":{"find":"#{intl::MESSAGE_EDITED}","match":"/(\\i\\.createElement\\(\\i,\\{)(className:)/","replace":"$1foo:1,$2"}}
 {"tool":"patch","args":{"action":"verifyApplied","pluginName":"MyPlugin"}}
 {"tool":"console","args":{"action":"recent","level":"error","limit":30}}

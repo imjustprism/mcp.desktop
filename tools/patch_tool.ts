@@ -5,10 +5,11 @@
  */
 
 import { runtimeHashMessageKey } from "@utils/intlHash";
-import { canonicalizeMatch } from "@utils/patches";
+import { canonicalizeMatch, canonicalizeReplace } from "@utils/patches";
 
 import { generateFinds } from "../finds/genFinds";
 import { diagnoseMatch, literalRuns } from "../finds/matchRepair";
+import { type OverlapPatch, simulatePatchOverlaps } from "../finds/patchOverlap";
 import { FinderResult, FinderSpec, PatchToolArgs, PluginPatch, PluginReplacement, ToolResult } from "../types";
 import { filters, findAll, findStore, plugins, webpackPatches } from "../webpack";
 import { recentConsole } from "./console_tool";
@@ -363,6 +364,9 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
             if (!regex) {
                 allErrors.push("Match is not a valid regex");
                 matchAnalysis.score = A.SCORE_MIN;
+            } else if (/\([^)]*[*+][^)]*\)[*+]/.test(regex.source)) {
+                allErrors.push("Match has a nested unbounded quantifier that can cause catastrophic backtracking and freeze the client. Rewrite with a bounded {0,N} or remove the outer quantifier");
+                matchAnalysis.score = A.SCORE_MIN;
             } else {
                 regex.lastIndex = 0;
                 matchWorks = regex.test(source);
@@ -426,6 +430,51 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
             .sort((a, b) => b.pluginCount - a.pluginCount);
 
         return { totalConflictingModules: ranked.length, conflicts: ranked.slice(0, args.limit ?? P.CONFLICTS_DEFAULT_TOP_N) };
+    }
+
+    if (action === "overlaps") {
+        let moduleId = args.id;
+        if (moduleId == null && findStr) {
+            const canon = canonicalizeMatch(findStr);
+            moduleId = u.findModuleIds(src => src.includes(canon), P.DIFF_EARLY_EXIT)[0];
+        }
+        if (!moduleId) return { error: true, message: findStr ? `No loaded module matches the find: ${findStr.slice(0, 80)}` : "id or find required" };
+
+        const source = u.getModuleSource(moduleId);
+        if (!source) return u.moduleNotFound(moduleId);
+
+        const appliedBy = new Set(u.getModulePatchedBy(moduleId));
+        const overlapPatches: OverlapPatch[] = [];
+        let skippedFunctionReplaces = 0;
+        for (const { name: nm, patch } of u.eachPatch()) {
+            if (!appliedBy.has(nm)) continue;
+            if (!u.canonFindMatcher(patch.find).test(source)) continue;
+            for (const rep of u.getReplacements(patch)) {
+                if (typeof rep.replace !== "string") {
+                    skippedFunctionReplaces++;
+                    continue;
+                }
+                if (rep.match == null) continue;
+                overlapPatches.push({ plugin: nm, match: canonicalizeMatch(rep.match), replace: canonicalizeReplace(rep.replace, nm) });
+            }
+        }
+
+        if (overlapPatches.length < 2) {
+            return { moduleId, patchCount: overlapPatches.length, ...(skippedFunctionReplaces ? { skippedFunctionReplaces } : {}), conflicts: 0, message: "Fewer than two simulatable string-replacement patches actually apply to this module, no ordering conflict is possible" };
+        }
+
+        const report = simulatePatchOverlaps(source, overlapPatches);
+        return {
+            moduleId,
+            moduleSize: source.length,
+            patchCount: overlapPatches.length,
+            ...(skippedFunctionReplaces ? { skippedFunctionReplaces } : {}),
+            conflicts: report.conflicts,
+            patches: report.patches.map(r => ({ plugin: r.plugin, matched: r.matched, brokenByPrior: r.brokenByPrior, note: r.note })),
+            ...(report.conflicts
+                ? { warning: `${report.conflicts} replacement(s) fail because an earlier plugin rewrote this module first. Registration order matters here` }
+                : { note: "All patches apply cleanly in registration order" }),
+        };
     }
 
     if (action === "diff") {
@@ -680,7 +729,7 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
         };
     }
 
-    return { error: true, message: "Unknown action. Valid: unique, plugin, analyze, lint, finds, conflicts, diff, broken, suggestFix, verifyApplied" };
+    return { error: true, message: "Unknown action. Valid: unique, plugin, analyze, lint, finds, conflicts, overlaps, diff, broken, suggestFix, verifyApplied" };
 }
 
 function validateFinder(spec: FinderSpec): FinderResult {

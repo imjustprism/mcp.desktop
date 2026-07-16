@@ -29,8 +29,8 @@ function walkFiberUp(fiber: ReactFiber | null, maxDepth: number, predicate: (f: 
 
 export async function handleReact(args: ReactToolArgs): Promise<ToolResult> {
     const { action, selector, componentName } = args;
-    if (args.limit === 0) return { error: true, message: "limit must be >= 1 (omit for default)" };
-    if (args.depth === 0) return { error: true, message: "depth must be >= 1 (omit for default)" };
+    if (args.limit != null && args.limit < 1) return { error: true, message: "limit must be >= 1 (omit for default)" };
+    if (args.depth != null && args.depth < 1) return { error: true, message: "depth must be >= 1 (omit for default)" };
     const maxDepth = u.clamp(args.depth, LIMITS.REACT.DEFAULT_DEPTH, 1, LIMITS.REACT.MAX_DEPTH);
     const direction = args.direction ?? "up";
     const includeProps = args.includeProps ?? false;

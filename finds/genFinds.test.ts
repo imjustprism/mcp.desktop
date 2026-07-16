@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { scoreDurability } from "./durability";
-import { computeBadSpans, detectRequireParam, generateFinds } from "./genFinds";
+import { computeVolatileSpans, detectRequireParam, generateFinds } from "./genFinds";
 import { tokenize, tokenText } from "./tokenizer";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -77,7 +77,7 @@ check("detects webpack require param from header", () => {
 });
 
 check("bad spans cover the side-effect and import module ids", () => {
-    const spans = computeBadSpans(fixture, "i");
+    const spans = computeVolatileSpans(fixture, "i");
     const covers = (needle: string) => {
         const idx = fixture.indexOf(needle);
         return spans.some(([s, e]) => idx >= s && idx < e);
@@ -192,7 +192,7 @@ check("R3: regex at a template-hole start does not leak a require id", () => {
 
 check("R4: webpack .t(id) namespace require is excluded", () => {
     const src = "0,function(e,t,i){i.d(t,{Ay:()=>P});function P(e){return i.t(415779,7).createStore(e)}}";
-    const spans = computeBadSpans(src, "i");
+    const spans = computeVolatileSpans(src, "i");
     const idx = src.indexOf("415779");
     assert.ok(spans.some(([s, e]) => idx >= s && idx < e), ".t(id) not span-excluded");
     noLeak(src, ["415779"]);
@@ -260,7 +260,7 @@ check("R12: generateFinds is linear on a large single-string module (no ReDoS ha
 
 check("R13: webpackId:<id> property beside a lazy bind does not leak the module id", () => {
     const src = '0,function(e,t,n){t.exports=e=>Promise.all([n.e("99193")]).then(n.bind(n,888250)),webpackId:888250,name:"AppOverlay"}';
-    const spans = computeBadSpans(src, "n");
+    const spans = computeVolatileSpans(src, "n");
     const idx = src.indexOf("webpackId:888250");
     assert.ok(spans.some(([s, ee]) => idx >= s && idx < ee), "webpackId:id not span-excluded");
     noLeak(src, ["888250", "webpackId:888250"]);

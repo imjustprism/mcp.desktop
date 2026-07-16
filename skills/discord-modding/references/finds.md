@@ -11,11 +11,11 @@
 With options:
 
 ```json
-{ "tool": "module", "args": { "action": "genFinds", "id": "455629", "requireUnique": true, "minScore": 8, "limit": 20 } }
+{ "tool": "module", "args": { "action": "genFinds", "id": "455629", "requireUnique": true, "minScore": 6, "limit": 20 } }
 ```
 
 - `id` (required): module ID.
-- `minScore` (default 8): minimum sequence score. Length/entropy weight of the token run, NOT durability. Raise it to get longer, more distinctive anchors.
+- `minScore` (default 6): minimum content score, the summed character length of the content tokens (identifiers and strings) in a run, NOT durability. Raise it to get longer, more distinctive anchors.
 - `requireUnique` (default false): drop any find that matches more than one loaded module factory.
 - `limit` (default 20, max 200): max finds returned.
 
@@ -49,7 +49,7 @@ Field meanings:
 - `find`: the literal string (or regex source when `regex: true`) to use as `find:` in a patch or `findByCode(...)` arg.
 - `type`: `"intl"` (synthesized `#{intl::KEY}` placeholder), `"sequence"` (contiguous token run from the source), `"pair"` (two runs joined by a bounded-gap regex, always `regex: true`).
 - `tier` / `durability`: see durability tiers below. `durability` is 0 to 10.
-- `score`: distinctiveness weight (token length × log entropy). Bigger = more content, less likely to collide. **`score` is the raw sequence weight, NOT the rank key.** genFinds ranks by durability, not score. A short intl find (low score) outranks a long weak sequence (high score). Don't sort candidates by `score` yourself.
+- `score`: how much build-stable content the find carries, the summed length of its identifier and string tokens. Bigger = more content, less likely to collide. **`score` is only a tiebreak, NOT the rank key.** genFinds ranks by durability, not score. A short intl find (low score) outranks a long weak run (high score). Don't sort candidates by `score` yourself.
 - `unique` / `moduleCount`: whether the find matched exactly one **loaded** factory, and how many it matched. `unique: true` with `moduleCount: 1` is what you want.
 - `reason`: the primary durability rationale/warning.
 
@@ -91,8 +91,8 @@ Candidates are token runs. A run is cut whenever it hits:
 
 - **require/import spans**: `n(12345)`, `n.n(e)`, `n.t(123)`, `n.e("chunkId")`, `n.bind(n, 123)`, and whole `var a=n(123),b=n(456);` chains (the require param is auto-detected from the module header). Module ids inside these are reassigned every build, so any find containing them dies immediately.
 - **`webpackId: 123` spans**: same reason, raw module ids.
-- **identifiers ≤4 chars**: treated as minified. Renamed per build, so a run breaks at each one. Only idents ≥5 chars survive into finds.
-- Lone punctuation / lone declaration keywords, runs with no content token (ident/string/template/regex), runs scoring below `minScore`, and finds over 400 chars.
+- **short identifiers ≤3 chars**: treated as minifier locals. Renamed per build, so a run breaks at each one. Idents ≥4 chars survive into finds, plus short dot-accessed property names like `.id` or `.on` (property names survive minification even when short).
+- Runs with no content token (ident/string/template/regex) and runs scoring below `minScore` are dropped, which naturally discards lone punctuation and lone keywords. Finds over 400 chars are also dropped.
 
 This is why generated finds sometimes look like disjoint fragments of the source. Everything build-volatile has been carved out.
 

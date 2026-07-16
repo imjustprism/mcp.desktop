@@ -208,7 +208,7 @@ export function parsePublicExports(id: string): Record<string, string> {
             else if (src[i] === "}" && --depth === 0) { end = i; break; }
         }
         if (end < 0) continue;
-        for (const mm of src.slice(braceStart + 1, end).matchAll(/(\w+):\(\)=>\(?(?:0,)?([\w$]+(?:\.[\w$]+)*)\)?/g)) if (!Object.hasOwn(publicExports, mm[1])) publicExports[mm[1]] = mm[2];
+        for (const mm of src.slice(braceStart + 1, end).matchAll(/(?<![\w$.])([\w$]+):\(\)=>\(?(?:0,)?([\w$]+(?:\.[\w$]+)*)\)?/g)) if (!Object.hasOwn(publicExports, mm[1])) publicExports[mm[1]] = mm[2];
     }
     return publicExports;
 }

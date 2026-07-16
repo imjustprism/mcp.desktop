@@ -62,7 +62,7 @@ function mergeIntervals(intervals: Array<[number, number]>): Array<[number, numb
     return out;
 }
 
-export function computeBadSpans(source: string, requireParam: string | undefined): readonly Span[] {
+export function computeVolatileSpans(source: string, requireParam: string | undefined): readonly Span[] {
     const patterns: RegExp[] = [
         /webpackId:\s*"?\d+"?/g
     ];
@@ -85,7 +85,7 @@ export function computeBadSpans(source: string, requireParam: string | undefined
     return mergeIntervals(spans);
 }
 
-function makeOverlapsBadSpan(spans: readonly Span[]): (start: number, end: number) => boolean {
+function makeVolatileSpanTest(spans: readonly Span[]): (start: number, end: number) => boolean {
     return (start: number, end: number) => {
         let lo = 0;
         let hi = spans.length - 1;
@@ -107,10 +107,10 @@ function isStableToken(
     source: string,
     tokens: readonly Token[],
     i: number,
-    overlapsBadSpan: (start: number, end: number) => boolean
+    inVolatileSpan: (start: number, end: number) => boolean
 ): boolean {
     const t = tokens[i];
-    if (overlapsBadSpan(t.start, t.end)) return false;
+    if (inVolatileSpan(t.start, t.end)) return false;
     if (t.kind !== "ident") return true;
     if (t.end - t.start >= MIN_STABLE_IDENT_LEN) return true;
     const prev = tokens[i - 1];
@@ -120,12 +120,12 @@ function isStableToken(
 function segmentStableRuns(
     source: string,
     tokens: readonly Token[],
-    overlapsBadSpan: (start: number, end: number) => boolean
+    inVolatileSpan: (start: number, end: number) => boolean
 ): Array<[number, number]> {
     const runs: Array<[number, number]> = [];
     let open = -1;
     for (let i = 0; i <= tokens.length; i++) {
-        if (i < tokens.length && isStableToken(source, tokens, i, overlapsBadSpan)) {
+        if (i < tokens.length && isStableToken(source, tokens, i, inVolatileSpan)) {
             if (open < 0) open = i;
         } else if (open >= 0) {
             runs.push([open, i]);
@@ -168,7 +168,7 @@ export function generateFinds(source: string, opts: GenFindsOptions = {}): GenFi
     const requireParam = opts.requireParam ?? detectRequireParam(source);
 
     const tokens = tokenize(source);
-    const overlapsBadSpan = makeOverlapsBadSpan(computeBadSpans(source, requireParam));
+    const inVolatileSpan = makeVolatileSpanTest(computeVolatileSpans(source, requireParam));
 
     const seen = new Set<string>();
     const candidates: GenFind[] = [];
@@ -180,11 +180,11 @@ export function generateFinds(source: string, opts: GenFindsOptions = {}): GenFi
         candidates.push(f);
     }
 
-    for (const [lo, hi] of segmentStableRuns(source, tokens, overlapsBadSpan)) {
+    for (const [lo, hi] of segmentStableRuns(source, tokens, inVolatileSpan)) {
         const score = contentWeight(tokens, lo, hi);
         if (score < minScore) continue;
-        const start = tokens[lo].start;
-        const end = tokens[hi - 1].end;
+        const { start } = tokens[lo];
+        const { end } = tokens[hi - 1];
         const find = source.slice(start, end);
         if (find.length > MAX_FIND_LEN || seen.has(find)) continue;
         seen.add(find);

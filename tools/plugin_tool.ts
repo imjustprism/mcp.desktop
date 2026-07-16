@@ -27,7 +27,7 @@ export async function handlePlugin(args: PluginToolArgs): Promise<ToolResult> {
     const validate = args.validate ?? false;
 
     const findPlugin = (filter: string) => {
-        const plugin = plugins[filter];
+        const plugin = Object.hasOwn(plugins, filter) ? plugins[filter] : undefined;
         if (plugin) return { plugin, name: filter };
         const similar = u.rankedSuggestions(Object.keys(plugins), filter, LIMITS.PLUGIN.SUGGESTIONS);
         return { error: true, message: `Plugin "${filter}" not found`, suggestions: similar.length ? similar : undefined };

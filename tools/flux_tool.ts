@@ -101,7 +101,10 @@ export async function handleFlux(args: FluxToolArgs): Promise<ToolResult> {
         const ah = dispatcher._actionHandlers;
         const getOrdered = ah?.getOrderedActionHandlers;
         if (typeof getOrdered !== "function") return { error: true, message: "getOrderedActionHandlers unavailable" };
+        const orderedCache = ah?._orderedActionHandlers as Record<string, unknown> | undefined;
+        const alreadyCached = !!orderedCache && Object.prototype.hasOwnProperty.call(orderedCache, type);
         const ordered = u.safeCall<Array<{ name?: string }>>(() => getOrdered.call(ah, { type }), []);
+        if (!alreadyCached && orderedCache && Array.isArray(ordered) && ordered.length === 0) delete orderedCache[type];
         if (!Array.isArray(ordered)) return { error: true, message: `No handler chain for "${type}"` };
         const bandByName: Record<string, number | undefined> = Object.create(null);
         const nodes = ah?._dependencyGraph?.nodes ?? {};

@@ -44,7 +44,7 @@ export async function handleResolve(args: ResolveToolArgs): Promise<ToolResult> 
     if (/Store$/.test(landmark)) {
         const resolved = resolveStore(landmark);
         if (resolved) {
-            const defining = u.findModuleIds(src => src.includes(`displayName:"${resolved.name}"`), limit);
+            const defining = u.findModuleIds(src => src.includes(`displayName:"${resolved.name}"`) || src.includes(`displayName="${resolved.name}"`), limit);
             const referencing = defining.length ? [] : u.findModuleIds(src => src.includes(`"${resolved.name}"`), limit);
             return { landmark, type: "store", store: resolved.name, definingModules: decorate(defining), referencingModules: referencing.length ? decorate(referencing) : undefined };
         }

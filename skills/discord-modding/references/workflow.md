@@ -101,13 +101,13 @@ Reverse dependency edges from require call-sites. High `importedBy` count means 
 Do not invent `find` strings by hand. `genFinds` exhaustively enumerates build-stable candidate finds for a module. It excludes `require`/`import` spans, resolves intl to `#{intl::KEY}`, ranks candidates by **durability**, and (with `requireUnique`) keeps only finds that match exactly one loaded factory.
 
 ```json
-{ "tool": "module", "args": { "action": "genFinds", "id": "451234", "requireUnique": true, "minScore": 8 } }
+{ "tool": "module", "args": { "action": "genFinds", "id": "451234", "requireUnique": true, "minScore": 6 } }
 ```
 
 Reading the output:
 - **Durability tiers** rank each candidate. Prefer the highest tier: stable literal/intl-anchored strings that Discord is unlikely to rename. Lower tiers lean on minified-adjacent tokens and are more likely to rot on the next build.
 - `requireUnique: true` guarantees the find is unique among currently loaded factories. If a high-durability candidate is not unique, combine it with more context or lower to a still-durable but more specific span.
-- `minScore` (default 8) drops weak sequences. Raise it to see only the strongest anchors.
+- `minScore` (default 6) drops low-content runs. Raise it to see only the strongest anchors.
 
 Pick the highest-durability candidate that is also unique. That string becomes your patch `find`.
 

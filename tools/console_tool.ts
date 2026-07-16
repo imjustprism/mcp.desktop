@@ -4,16 +4,21 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { attributeStack } from "../finds/stackAttribution";
 import { ConsoleToolArgs, ToolResult } from "../types";
+import { getModulePatchedBy } from "./utils";
 
 export interface ConsoleEntry {
     ts: number;
     level: "error" | "warn";
     text: string;
+    stackTop?: string | null;
+    stackModules?: readonly string[];
 }
 
 const MAX_ENTRIES = 500;
 const MAX_TEXT_LEN = 400;
+const MAX_STACK_MODULES = 6;
 const DEFAULT_RECENT_LIMIT = 30;
 
 const buffer: ConsoleEntry[] = [];
@@ -22,7 +27,7 @@ let originals: { error: typeof console.error; warn: typeof console.warn } | null
 
 function stringifyArg(arg: unknown): string {
     if (typeof arg === "string") return arg;
-    if (arg instanceof Error) return arg.stack?.split("\n").slice(0, 3).join(" | ") ?? arg.message;
+    if (arg instanceof Error) return typeof arg.stack === "string" ? arg.stack.split("\n").slice(0, 3).join(" | ") : arg.message;
     try {
         return JSON.stringify(arg) ?? String(arg);
     } catch {
@@ -30,10 +35,28 @@ function stringifyArg(arg: unknown): string {
     }
 }
 
+function extractStackModules(args: unknown[]): Pick<ConsoleEntry, "stackTop" | "stackModules"> | null {
+    for (const a of args) {
+        if (a instanceof Error && typeof a.stack === "string") {
+            const attr = attributeStack(a.stack);
+            if (attr.modulesInvolved.length) {
+                return { stackTop: attr.topModuleId, stackModules: attr.modulesInvolved.slice(0, MAX_STACK_MODULES) };
+            }
+        }
+    }
+    return null;
+}
+
 function push(level: ConsoleEntry["level"], args: unknown[]): void {
     try {
         const text = args.map(stringifyArg).join(" ").slice(0, MAX_TEXT_LEN);
-        buffer.push({ ts: Date.now(), level, text });
+        const entry: ConsoleEntry = { ts: Date.now(), level, text };
+        const stack = extractStackModules(args);
+        if (stack) {
+            entry.stackTop = stack.stackTop;
+            entry.stackModules = stack.stackModules;
+        }
+        buffer.push(entry);
         if (buffer.length > MAX_ENTRIES) buffer.splice(0, buffer.length - MAX_ENTRIES);
     } catch {}
 }
@@ -99,6 +122,11 @@ export function handleConsole(args: ConsoleToolArgs): ToolResult {
     return {
         count: entries.length,
         capturing: originals !== null,
-        entries: entries.map(e => ({ agoMs: Date.now() - e.ts, level: e.level, text: e.text })),
+        entries: entries.map(e => {
+            const base = { agoMs: Date.now() - e.ts, level: e.level, text: e.text };
+            if (!e.stackModules?.length) return base;
+            const patchedBy = [...new Set(e.stackModules.flatMap(id => getModulePatchedBy(id)))];
+            return { ...base, attribution: { module: e.stackTop ?? null, modules: e.stackModules, patchedBy: patchedBy.length ? patchedBy : undefined } };
+        }),
     };
 }

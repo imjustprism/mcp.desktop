@@ -121,7 +121,7 @@ export async function handleTrace(args: TraceToolArgs): Promise<ToolResult> {
         const trace = newTrace({ isStoreTrace: true });
 
         const handler = () => {
-            if (trace.captures.length >= trace.maxCaptures) return;
+            if (Date.now() >= trace.expiresAt || trace.captures.length >= trace.maxCaptures) return;
             trace.captures.push({ ts: Date.now(), type: `${storeName}:change`, data: { event: "stateChanged" } });
         };
 

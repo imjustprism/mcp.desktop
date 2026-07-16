@@ -10,16 +10,16 @@ export const TOOLS: MCPTool[] = [
     {
         name: "module",
         description:
-            "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: source. exports: list. context: code around pattern. diff: patched vs original. functionAt: full function at pattern. structure: outline without source. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track newly-registered modules. suggest: find patch anchors. genFinds: exhaustively enumerate build-stable candidate finds (suggest power-mode: excludes require/import spans, resolves intl to #{intl::KEY}, ranks by durability, unique = among loaded factories). annotate: intl-resolved source. css: CSS class index/lookup. explain: one-call dossier (role, real exports, imports, importedBy count, patchedBy, intl/store/dispatch fingerprint).",
+            "Webpack modules. find: by props/code/displayName/className/exportName/pattern. extract: source. exports: list. context: code around pattern. diff: patched vs original. functionAt: full function at pattern. structure: outline without source. stats: counts. loadLazy: load lazy chunks. watch/watchGet/watchStop: track newly-registered modules. suggest: find patch anchors. genFinds: exhaustively enumerate build-stable candidate finds (suggest power-mode: excludes volatile module-id spans, resolves intl to #{intl::KEY}, ranks by durability, unique = among loaded factories). fingerprint: build-stable landmark set (intl keys, store names, error strings) for cross-build module identity. annotate: intl-resolved source. css: CSS class index/lookup. explain: one-call dossier (role, real exports, imports, importedBy count, patchedBy, intl/store/dispatch fingerprint).",
         inputSchema: {
             type: "object",
             properties: {
                 action: {
                     type: "string",
-                    enum: ["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "genFinds", "annotate", "css", "explain"],
+                    enum: ["find", "extract", "exports", "context", "diff", "functionAt", "structure", "stats", "loadLazy", "watch", "watchGet", "watchStop", "suggest", "genFinds", "fingerprint", "annotate", "css", "explain"],
                 },
                 id: { type: "string", description: "Module ID" },
-                minScore: { type: "number", description: "genFinds: min sequence score (default 8)" },
+                minScore: { type: "number", description: "genFinds: min content score, summed identifier and string lengths (default 6)" },
                 requireUnique: { type: "boolean", description: "genFinds: only return finds unique among loaded factories", default: false },
                 props: { type: "array", items: { type: "string" }, description: "Find by export props" },
                 code: { type: "array", items: { type: "string" }, description: "Find by code in exports" },
@@ -87,11 +87,11 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "patch",
-        description: "Patch validation. unique: find matches 1 module. analyze: scan all plugins for broken patches. plugin: one plugin's patches+health. lint: pattern quality score. finds: validate webpack finders. conflicts: modules patched by multiple plugins. diff: patches targeting a module. broken: unconsumed patches. suggestFix: for broken patches (all, or one plugin via pluginName, or a single find), locate the module the stale find still partially matches and generate fresh durable unique replacement finds. Pass match to also diagnose the match regex per candidate and return a verified adjusted match when repairable. verifyApplied: prove a plugin's patches actually took effect (per-patch APPLIED/NOT_APPLIED/FIND_DEAD status + source-change check + recent console errors).",
+        description: "Patch validation. unique: find matches 1 module. analyze: scan all plugins for broken patches. plugin: one plugin's patches+health. lint: pattern quality score. finds: validate webpack finders. conflicts: modules patched by multiple plugins. overlaps: simulate a module's patches in registration order to catch order-dependent breakage where one plugin's rewrite destroys another's anchor (needs id or find). diff: patches targeting a module. broken: unconsumed patches. suggestFix: for broken patches (all, or one plugin via pluginName, or a single find), locate the module the stale find still partially matches and generate fresh durable unique replacement finds. Pass match to also diagnose the match regex per candidate and return a verified adjusted match when repairable. verifyApplied: prove a plugin's patches actually took effect (per-patch APPLIED/NOT_APPLIED/FIND_DEAD status + source-change check + recent console errors).",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["unique", "analyze", "plugin", "lint", "finds", "conflicts", "diff", "broken", "suggestFix", "verifyApplied"] },
+                action: { type: "string", enum: ["unique", "analyze", "plugin", "lint", "finds", "conflicts", "overlaps", "diff", "broken", "suggestFix", "verifyApplied"] },
                 find: { type: "string", description: "Find string (supports #{intl::KEY})" },
                 match: { type: "string", description: "/regex/flags (\\i for minified vars)" },
                 replace: { type: "string", description: "Replacement" },
@@ -195,11 +195,11 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "graph",
-        description: "Module dependency graph (from require call-sites in factory source). imports: modules this one requires. importedBy: modules requiring this one. path: dependency path from id to `to`. neighborhood: local subgraph (nodes+edges). exports: real public export names (RealName to local), works even for unloaded modules.",
+        description: "Module dependency graph (from require call-sites in factory source). imports: modules this one requires. importedBy: modules requiring this one. path: dependency path from id to `to`. neighborhood: local subgraph (nodes+edges). exports: real public export names (RealName to local), works even for unloaded modules. usedBy: symbol-level impact, which of this module's exports each importer actually uses.",
         inputSchema: {
             type: "object",
             properties: {
-                action: { type: "string", enum: ["imports", "importedBy", "path", "neighborhood", "exports"] },
+                action: { type: "string", enum: ["imports", "importedBy", "path", "neighborhood", "exports", "usedBy"] },
                 id: { type: "string", description: "Module ID" },
                 to: { type: "string", description: "Target module ID (for path)" },
                 depth: { type: "number", description: "Max hops for path (default 12)" },
@@ -276,7 +276,7 @@ export const TOOLS: MCPTool[] = [
     },
     {
         name: "batch",
-        description: "Run up to 10 read-only tool calls in one round-trip. calls: [{tool, args}]. Only read-only tool/action combos are accepted (mutating actions like flux.dispatch, plugin.toggle, store.call, module.loadLazy, evaluateCode are rejected per-call). Per-call errors are isolated.",
+        description: "Run up to 10 read-only tool calls in one round-trip, as a pipeline. calls: [{tool, args}]. A later call can reference an earlier result with a $N.path string, for example {\"action\":\"genFinds\",\"id\":\"$0.ids[0]\"} uses the first id from call 0. Refs resolve by literal path only, no expressions. Only read-only tool/action combos are accepted (mutating actions like flux.dispatch, plugin.toggle, store.call, module.loadLazy, evaluateCode are rejected per-call). Per-call errors are isolated.",
         inputSchema: {
             type: "object",
             properties: {

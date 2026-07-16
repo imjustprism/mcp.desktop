@@ -44,43 +44,7 @@ curl -s -X POST http://127.0.0.1:8486 -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-### stdio client via mcp-remote
-
-Many clients only speak stdio. Wrap the HTTP server with `mcp-remote`, which spawns as a stdio child and forwards to the local endpoint. Point it at the root URL. No path, no auth.
-
-Paste this into the client's `mcp.json` (Claude Desktop, Cursor, and similar use the same `mcpServers` shape):
-
-```json
-{
-  "mcpServers": {
-    "discord-mcp": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "http://127.0.0.1:8486",
-        "--transport",
-        "http-only"
-      ]
-    }
-  }
-}
-```
-
-`--transport http-only` forces plain HTTP POST and skips the SSE probe, which this server does not serve. The `discord-mcp` key is the client-side label and can be any name. The server still identifies itself as `discord-mcp` on the wire.
-
 If the client does not see the server, start Discord first so the server is listening, then open the client session. Confirm the "MCP on :8486" toast appears in Discord.
-
-## Name map
-
-The moving parts have four different names. They all refer to this one project.
-
-| Thing | Name |
-| --- | --- |
-| Repo folder | `mcp.desktop` |
-| Plugin name in Discord settings | `mcp` |
-| MCP server name on the wire | `discord-mcp` |
-| Local port | `8486` |
 
 ## Tools
 
@@ -113,10 +77,6 @@ Find generation lives in `finds/`. A hand-rolled JS tokenizer feeds a run enumer
 
 Requests never leave the machine. The server binds to `127.0.0.1` and rejects any non-local origin.
 
-### Origin and CORS
-
-For browser-based clients, the response carries `Access-Control-Allow-Origin: *`, so a page can read the reply. That star is not a green light for the open web. Every request with an `Origin` header is checked, and any non-local origin gets a `403` before the tool runs. Only a client whose page origin is localhost, or a client that sends no `Origin` header at all such as curl or a stdio bridge, can actually drive the server. A remote site that tries to reach `127.0.0.1:8486` from a user's browser is rejected at the origin check regardless of the permissive CORS header.
-
 ## Skill package
 
 `skills/discord-modding/` bundles agent-facing docs for driving these tools: a `SKILL.md` quickstart plus reference files for the patch-authoring workflow, find generation, patch repair, the intl system, runtime introspection, module discovery, power combos, and a tables reference. Point an MCP client's skill loader at that directory.
@@ -139,6 +99,17 @@ The server has no authentication. Any process on your machine can reach `127.0.0
 - A find marked `unique` is unique only among the webpack factories loaded this session. It can still collide with a module in an unfetched lazy chunk. Run `module loadLazy` and re-check for screens you have not opened.
 - The plugin has one setting, `logRequests`, off by default. It logs each incoming call to the console.
 - The intl reverse map ships in `map/key_map.json`. Keys that are not in that map and are not referenced by name in loaded code cannot be reversed and stay as raw 6-character hashes. `intl recover` reconstructs many of these from live messages by hashing candidate key names and proving the match. Recovered keys are cached to disk and reload on the next start.
+
+## Credits
+
+A huge shoutout to sadan, who does genuinely amazing work in this space. A lot of the ideas here trace straight back to that work. Generating build-stable find anchors, scoring them by how well they survive a new build, cutting out the volatile webpack import spans, and turning Discord's hashed intl keys back into real names are all things sadan worked out, and studying it is what shaped how this plugin reads minified Discord internals. Real respect and real thanks for building all of it and for keeping it out in the open to learn from.
+
+Go look at what sadan makes:
+
+- Project: https://github.com/sadan4/sadan.zip
+- sadan on GitHub: https://github.com/sadan4
+
+sadan's project is licensed AGPL-3.0. This plugin is GPL-3.0 and is an independent reimplementation, but the debt for the underlying ideas is real and gladly acknowledged.
 
 ## License
 

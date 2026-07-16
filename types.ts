@@ -315,12 +315,12 @@ export interface ToolError {
 
 export type ToolResult<T = Record<string, unknown>> = T | ToolError;
 
-type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "functionAt" | "structure" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate" | "css" | "explain" | "genFinds";
+type ModuleAction = "find" | "extract" | "exports" | "context" | "diff" | "functionAt" | "structure" | "stats" | "loadLazy" | "watch" | "watchGet" | "watchStop" | "suggest" | "annotate" | "css" | "explain" | "genFinds" | "fingerprint";
 type StoreAction = "find" | "list" | "state" | "call" | "snapshot" | "links";
 type IntlAction = "hash" | "reverse" | "search" | "scan" | "targets" | "recover" | "clearCache";
 type FluxToolAction = "events" | "dispatch" | "listeners" | "graph" | "producers" | "chain";
-type GraphAction = "imports" | "importedBy" | "path" | "neighborhood" | "exports";
-type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "conflicts" | "diff" | "broken" | "suggestFix" | "verifyApplied";
+type GraphAction = "imports" | "importedBy" | "path" | "neighborhood" | "exports" | "usedBy";
+type PatchAction = "unique" | "analyze" | "plugin" | "lint" | "finds" | "conflicts" | "overlaps" | "diff" | "broken" | "suggestFix" | "verifyApplied";
 
 type FinderType = "byProps" | "byCode" | "store" | "componentByCode" | "exportedComponent" | "cssClasses" | "byClassNames";
 
