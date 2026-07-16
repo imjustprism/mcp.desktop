@@ -79,9 +79,7 @@ function diffProps(
 ): PropDelta[] {
     const b = before ?? {};
     const a = after ?? {};
-    const keys = new Set<string>();
-    for (const key of Object.keys(b)) keys.add(key);
-    for (const key of Object.keys(a)) keys.add(key);
+    const keys = new Set([...Object.keys(b), ...Object.keys(a)]);
     const deltas: PropDelta[] = [];
     for (const key of [...keys].sort()) {
         const inBefore = Object.prototype.hasOwnProperty.call(b, key);

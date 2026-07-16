@@ -50,8 +50,7 @@ function isMinifiedIdent(source: string, tokens: readonly Token[], i: number): b
     if (t.kind !== "ident") return false;
     if (t.end - t.start >= MIN_STABLE_IDENT_LEN) return false;
     const prev = tokens[i - 1];
-    if (prev !== undefined && prev.kind === "punct" && source[prev.start] === ".") return false;
-    return true;
+    return !(prev?.kind === "punct" && source[prev.start] === ".");
 }
 
 function collectRuns(tokens: readonly Token[], spans: readonly Span[]): Array<[number, number]> {
@@ -155,9 +154,8 @@ export function generateTokenFinds(source: string, opts: TokenFindsOptions = {})
         const dur = scoreDurability(literal);
         const bonus = Math.min(MAX_RESILIENCE_BONUS, iiCount);
         const durability = Math.min(DURABILITY_MAX, dur.score + bonus);
-        const reasons = bonus > 0
-            ? [...dur.reasons, `abstracts ${iiCount} minified identifier(s) to the \\i metaclass so it survives minified renaming across builds`]
-            : [...dur.reasons];
+        const reasons = [...dur.reasons];
+        if (bonus > 0) reasons.push(`abstracts ${iiCount} minified identifier(s) to the \\i metaclass so it survives minified renaming across builds`);
 
         out.push({ find: pattern, score: contentWeight, durability, tier: dur.tier, reasons });
     }

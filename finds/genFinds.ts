@@ -86,7 +86,7 @@ export function computeVolatileSpans(source: string, requireParam: string | unde
 }
 
 function makeVolatileSpanTest(spans: readonly Span[]): (start: number, end: number) => boolean {
-    return (start: number, end: number) => {
+    return (start, end) => {
         let lo = 0;
         let hi = spans.length - 1;
         let ans = -1;
@@ -114,7 +114,7 @@ function isStableToken(
     if (t.kind !== "ident") return true;
     if (t.end - t.start >= MIN_STABLE_IDENT_LEN) return true;
     const prev = tokens[i - 1];
-    return prev !== undefined && prev.kind === "punct" && source[prev.start] === ".";
+    return prev?.kind === "punct" && source[prev.start] === ".";
 }
 
 function segmentStableRuns(

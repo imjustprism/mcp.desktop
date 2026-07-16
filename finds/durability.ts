@@ -102,8 +102,7 @@ export function scoreDurability(find: string): Durability {
 
     const longNums = find.match(LONG_NUMBER_RE);
     if (longNums && !intlPlaceholder && tier !== "errorString") {
-        const penalty = Math.min(4, longNums.length * 2);
-        score -= penalty;
+        score -= Math.min(4, longNums.length * 2);
         reasons.push(`contains ${longNums.length} multi-digit number(s) (e.g. ${longNums[0]}), likely volatile module/chunk ids`);
     }
 

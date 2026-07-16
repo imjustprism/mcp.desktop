@@ -816,8 +816,7 @@ export async function handleModule(args: ModuleToolArgs): Promise<ToolResult> {
             }
         }
 
-        const hasUnique = candidates.some(c => c.unique);
-        if (!hasUnique && rawAnchors.length >= 2) {
+        if (!candidates.some(c => c.unique) && rawAnchors.length >= 2) {
             rawAnchors.sort((a, b) => a.index - b.index);
             for (let i = 0; i < rawAnchors.length && candidates.filter(c => c.unique).length < 5; i++) {
                 for (let j = i + 1; j < rawAnchors.length; j++) {

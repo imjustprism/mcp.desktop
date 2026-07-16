@@ -49,8 +49,7 @@ function firstMatchIndex(pattern: string, flags: string, source: string): number
     } catch {
         return -2;
     }
-    const m = re.exec(source);
-    return m ? m.index : -1;
+    return re.exec(source)?.index ?? -1;
 }
 
 function countMatches(pattern: string, flags: string, source: string, cap: number): number {

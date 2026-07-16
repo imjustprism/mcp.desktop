@@ -710,8 +710,7 @@ export function getComponentInfo(fiber: ReactFiber | null): ComponentInfo {
 }
 
 export function serializeValue(val: unknown, d = 0): unknown {
-    if (val === undefined) return undefined;
-    if (val === null) return null;
+    if (val == null) return val;
     if (d > 3) return typeof val;
 
     const t = typeof val;

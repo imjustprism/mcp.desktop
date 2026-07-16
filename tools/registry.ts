@@ -24,7 +24,7 @@ import { handleSearch } from "./search_tool";
 import { handleStore } from "./store_tool";
 import { handleTestPatch } from "./test_patch_tool";
 import { handleTrace } from "./trace_tool";
-import { mcpLogger } from "./utils";
+import { errMsg, mcpLogger } from "./utils";
 
 const Native = VencordNative.pluginHelpers.mcp as PluginNative<typeof import("../native")>;
 
@@ -126,7 +126,7 @@ async function handleBatch(args: { calls?: BatchCall[] }): Promise<unknown> {
             const result = await handler(callArgs);
             record({ tool, action: action ?? null, result }, result);
         } catch (e) {
-            record({ tool, action: action ?? null, error: true, message: e instanceof Error ? e.message : String(e) }, null);
+            record({ tool, action: action ?? null, error: true, message: errMsg(e) }, null);
         }
     }
     return {

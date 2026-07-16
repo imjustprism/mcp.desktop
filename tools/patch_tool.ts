@@ -163,9 +163,8 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
             const matchingModules = u.findModuleIds(matcher.test, P.PLUGIN_MATCH_EARLY_EXIT);
             const moduleCount = matchingModules.length;
 
-            const expectMultiple = patch.all === true;
             const rawStatus = moduleCount === 0 ? "NO_MATCH" : moduleCount === 1 ? "OK" : "MULTIPLE_MATCH";
-            const status = rawStatus === "MULTIPLE_MATCH" && expectMultiple ? "OK_ALL" : rawStatus;
+            const status = rawStatus === "MULTIPLE_MATCH" && patch.all === true ? "OK_ALL" : rawStatus;
 
             if (status === "OK" || status === "OK_ALL") ok++;
             else if (status === "NO_MATCH") broken++;
@@ -182,10 +181,7 @@ export async function handlePatch(args: PatchToolArgs): Promise<ToolResult> {
             if (patch.toBuild != null) flags.toBuild = patch.toBuild;
 
             let groupHealth: "OK" | "WOULD_UNDO" | undefined;
-            if (patch.group) {
-                const anyMissing = replacementInfo.some(r => r.matchFound === false);
-                groupHealth = anyMissing ? "WOULD_UNDO" : "OK";
-            }
+            if (patch.group) groupHealth = replacementInfo.some(r => r.matchFound === false) ? "WOULD_UNDO" : "OK";
 
             const info: Record<string, unknown> = { index, find: rawFind.slice(0, P.RAW_FIND_SLICE), status, moduleCount, replacements: replacementInfo };
             if (Object.keys(flags).length) info.flags = flags;

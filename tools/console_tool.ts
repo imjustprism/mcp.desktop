@@ -106,8 +106,7 @@ export function handleConsole(args: ConsoleToolArgs): ToolResult {
     }
 
     if (action === "stats") {
-        let errors = 0;
-        for (const e of buffer) if (e.level === "error") errors++;
+        const errors = buffer.filter(e => e.level === "error").length;
         return {
             capturing: originals !== null,
             capturingSinceMs: installedAt ? Date.now() - installedAt : 0,

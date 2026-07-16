@@ -40,8 +40,7 @@ export function attributeStack(
         const startsWithAt = trimmed.startsWith("at ");
         if (!startsWithAt && !LOCATION_TAIL.test(trimmed)) continue;
 
-        const moduleMatch = MODULE_TOKEN.exec(trimmed);
-        const moduleId = moduleMatch === null ? null : moduleMatch[1];
+        const moduleId = MODULE_TOKEN.exec(trimmed)?.[1] ?? null;
 
         let fn: string | null = null;
         if (startsWithAt) {

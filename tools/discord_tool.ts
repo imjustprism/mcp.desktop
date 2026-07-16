@@ -59,15 +59,13 @@ export async function handleDiscord(args: DiscordToolArgs): Promise<ToolResult> 
         const ready = !!UserStore.getCurrentUser();
         const build = readBuildInfo();
 
-        let serverRunning = true;
+        let serverRunning = false;
         let port = 0;
         try {
             const status = await Native.getServerStatus();
             serverRunning = status.running;
             port = status.port;
-        } catch {
-            serverRunning = false;
-        }
+        } catch {}
 
         const pluginNames = Object.keys(plugins);
         const enabledPlugins = pluginNames.filter(n => plugins[n]?.started).length;

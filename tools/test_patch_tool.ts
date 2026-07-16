@@ -172,10 +172,7 @@ function diagnoseMatchFailure(source: string, regex: RegExp): MatchDiagnostic {
     const src = regex.source;
     const { flags } = regex;
 
-    const tryVariant = (mutated: string): boolean => {
-        if (mutated === src) return false;
-        return u.safeCall(() => new RegExp(mutated, flags).test(source), false);
-    };
+    const tryVariant = (mutated: string): boolean => mutated !== src && u.safeCall(() => new RegExp(mutated, flags).test(source), false);
 
     const ranges = [...src.matchAll(/\.\{(\d+),(\d+)\}/g)];
     if (ranges.length) {
@@ -276,10 +273,7 @@ function discoverAnchors(source: string, centerIdx: number, radius: number): Anc
         }
     }
 
-    anchors.sort((a, b) => {
-        const typeComp = u.compareByAnchorType(a, b, ANCHOR_TYPE_ORDER);
-        return typeComp || a.distance - b.distance;
-    });
+    anchors.sort((a, b) => u.compareByAnchorType(a, b, ANCHOR_TYPE_ORDER) || a.distance - b.distance);
 
     return anchors.slice(0, CONTEXT.MAX_ANCHORS);
 }

@@ -17,21 +17,10 @@ const MIN_FRAGMENT_LEN = 4;
 const FRAGMENT_CAP = 12;
 const STRONG_CEILING = 1;
 const MODERATE_CEILING = 8;
-const SPLIT_CHARS = new Set([...".,()[]{}:;=!&|?"]);
+const SPLIT_CHARS = /[.,()[\]{}:;=!&|?]/;
 
 function splitPlainFind(find: string): string[] {
-    const parts: string[] = [];
-    let cur = "";
-    for (const ch of find) {
-        if (SPLIT_CHARS.has(ch)) {
-            parts.push(cur);
-            cur = "";
-        } else {
-            cur += ch;
-        }
-    }
-    parts.push(cur);
-    return parts;
+    return find.split(SPLIT_CHARS);
 }
 
 function candidateFragments(find: string, isRegex: boolean): string[] {

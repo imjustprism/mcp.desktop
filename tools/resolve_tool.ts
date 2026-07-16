@@ -21,8 +21,7 @@ export async function handleResolve(args: ResolveToolArgs): Promise<ToolResult> 
         const key = u.getIntlKeyFromHash(landmark);
         const bracket = `.t["${landmark}"]`;
         const dotRe = new RegExp(String.raw`\.t\.${escapeRegExp(landmark)}(?![A-Za-z0-9+/])`);
-        const uses = (src: string) => src.includes(bracket) || dotRe.test(src);
-        const modules = u.findModuleIds(uses, limit);
+        const modules = u.findModuleIds(src => src.includes(bracket) || dotRe.test(src), limit);
         if (key || modules.length) return { landmark, type: "intlHash", intlKey: key, find: u.intlFind(landmark, key), moduleCount: modules.length, modules: decorate(modules) };
     }
 

@@ -104,9 +104,8 @@ export async function handleStore(args: StoreToolArgs): Promise<ToolResult> {
         };
     }
 
-    if ((action === "call" || action === "state") && !method) return u.missingArg("method");
-
-    if ((action === "call" || action === "state") && method) {
+    if (action === "call" || action === "state") {
+        if (!method) return u.missingArg("method");
         const storeProto = u.safeProto(store);
         const desc = u.getDescriptor(store, storeProto, method);
 

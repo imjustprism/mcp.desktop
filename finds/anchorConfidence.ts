@@ -96,14 +96,12 @@ export function scoreAnchorConfidence(s: AnchorSignals): AnchorConfidence {
 
     const confidence = Math.round(Math.max(0, Math.min(100, raw)));
 
-    const reasons: string[] = [
+    const reasons = [
         uniquenessReason(moduleCount),
-        durabilityReason(durability, s.type)
-    ];
-    const typeNote = typeReason(s.type);
-    if (typeNote) reasons.push(typeNote);
-    const marginNote = marginReason(s.marginStrength);
-    if (marginNote) reasons.push(marginNote);
+        durabilityReason(durability, s.type),
+        typeReason(s.type),
+        marginReason(s.marginStrength)
+    ].filter((r): r is string => r !== null);
 
     return { confidence, band: bandOf(confidence), reasons };
 }

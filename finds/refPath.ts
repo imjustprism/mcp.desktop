@@ -13,20 +13,16 @@ export function isRefString(s: string): boolean {
 }
 
 function parsePath(path: string): readonly (string | number)[] {
-    const segmentPattern = /\.([A-Za-z_$][\w$]*)|\[(\d+)\]|\.(\d+)/g;
     const segments: (string | number)[] = [];
-    let m = segmentPattern.exec(path);
-    while (m !== null) {
+    for (const m of path.matchAll(/\.([A-Za-z_$][\w$]*)|\[(\d+)\]|\.(\d+)/g)) {
         if (m[1] !== undefined) segments.push(m[1]);
-        else if (m[2] !== undefined) segments.push(Number(m[2]));
-        else segments.push(Number(m[3]));
-        m = segmentPattern.exec(path);
+        else segments.push(Number(m[2] ?? m[3]));
     }
     return segments;
 }
 
 function readOwn(container: unknown, key: string | number): unknown {
-    if (container === null || container === undefined || typeof container !== "object") return undefined;
+    if (container === null || typeof container !== "object") return undefined;
     if (Array.isArray(container)) {
         if (typeof key !== "number") return undefined;
         return key < container.length ? container[key] : undefined;
@@ -46,7 +42,7 @@ function resolveRef(ref: string, priorResults: readonly unknown[]): unknown {
         current = readOwn(current, segment);
         if (current === undefined) return null;
     }
-    return current === undefined ? null : current;
+    return current ?? null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -74,6 +70,5 @@ function walk(value: unknown, priorResults: readonly unknown[], depth: number, b
 }
 
 export function resolveRefs<T>(value: T, priorResults: readonly unknown[]): T {
-    const budget: WalkBudget = { nodes: 0 };
-    return walk(value, priorResults, 0, budget) as T;
+    return walk(value, priorResults, 0, { nodes: 0 }) as T;
 }

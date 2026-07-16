@@ -17,14 +17,11 @@ const REDACTED = "[redacted]";
 const SECRET_KEY_RE = /token|secret|password|passwd|api[_-]?key|\bauth(?!or)|email/i;
 
 function isSecretSetting(key: string, opt: PluginOption): boolean {
-    if (SECRET_KEY_RE.test(key)) return true;
-    return /password|token/i.test(OPTION_TYPE_NAMES[opt.type ?? 0] ?? "");
+    return SECRET_KEY_RE.test(key) || /password|token/i.test(OPTION_TYPE_NAMES[opt.type ?? 0] ?? "");
 }
 
 export async function handlePlugin(args: PluginToolArgs): Promise<ToolResult> {
-    const { action, name, setting: settingKey, value: settingValue } = args;
-    const showPatches = args.showPatches ?? false;
-    const validate = args.validate ?? false;
+    const { action, name, setting: settingKey, value: settingValue, showPatches, validate } = args;
 
     const findPlugin = (filter: string) => {
         const plugin = Object.hasOwn(plugins, filter) ? plugins[filter] : undefined;

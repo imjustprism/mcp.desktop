@@ -53,9 +53,7 @@ export function matchAcrossBuilds(
         const candidates = new Set<number>();
         if (keys.length > 0) {
             for (const key of keys) {
-                const bucket = index.get(key);
-                if (!bucket) continue;
-                for (const ci of bucket) candidates.add(ci);
+                for (const ci of index.get(key) ?? []) candidates.add(ci);
             }
         } else {
             for (let ci = 0; ci < curr.length; ci++) candidates.add(ci);
